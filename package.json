@@ -1,0 +1,22 @@
+{
+  "name": "standard-recs",
+  "version": "0.1.0",
+  "description": "Recommend Standard.site documents based on your Bluesky likes",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute standard-recs-db --file=./schema.sql",
+    "db:init:local": "wrangler d1 execute standard-recs-db --local --file=./schema.sql"
+  },
+  "dependencies": {
+    "@atproto/api": "^0.15.0",
+    "hono": "^4.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.0.0",
+    "typescript": "^5.0.0",
+    "wrangler": "^4.80.0"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,60 @@
+# standard-recs — Cloudflare Workers config
+#
+# Setup:
+#   wrangler d1 create standard-recs-db
+#   wrangler vectorize create standard-recs-vectors --dimensions=1024 --metric=cosine
+#   npm run db:init
+#   wrangler secret put VOYAGE_API_KEY
+#   wrangler deploy
+#
+# Then:
+#   POST /admin/jetstream/start   — Start persistent publisher discovery
+#   POST /admin/sync              — Trigger first full pipeline
+
+name = "standard-recs"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[triggers]
+crons = ["0 6 * * *"]  # Daily at 6am UTC
+
+# ─── D1 Database ───
+
+[[d1_databases]]
+binding = "DB"
+database_name = "standard-recs-db"
+database_id = "YOUR_D1_DATABASE_ID"
+
+# ─── Vectorize ───
+
+[[vectorize]]
+binding = "VECTORS"
+index_name = "standard-recs-vectors"
+
+# ─── Workflows ───
+
+[[workflows]]
+binding = "SYNC_PIPELINE"
+name = "standard-recs-sync"
+class_name = "SyncPipelineWorkflow"
+
+# ─── Durable Objects ───
+
+[durable_objects]
+bindings = [
+  { name = "JETSTREAM_LISTENER", class_name = "JetstreamListener" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["JetstreamListener"]
+
+# ─── Config ───
+
+[vars]
+SYNC_BATCH_SIZE = "50"
+WINDOW_DAYS = "30"
+TOP_N = "10"
+
+# Secret (set via CLI):
+#   wrangler secret put VOYAGE_API_KEY

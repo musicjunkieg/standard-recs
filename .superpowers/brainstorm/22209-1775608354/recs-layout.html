@@ -1,0 +1,131 @@
+<h2>Recommendations Page Layout</h2>
+<p class="subtitle">How should the recs be presented? Click to select.</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="background:#faf8f5;padding:24px;font-family:'DM Sans',sans-serif;color:#2a2522;">
+        <!-- Mockup A: Stacked cards -->
+        <div style="max-width:480px;margin:0 auto;">
+          <div style="text-align:center;margin-bottom:16px;">
+            <div style="font-family:serif;font-size:18px;font-weight:600;">Recs for @alice.bsky.social</div>
+          </div>
+          <div style="background:#fff;border:1px solid #ede8e3;border-radius:10px;padding:16px;margin-bottom:10px;">
+            <div style="font-family:serif;font-size:15px;font-weight:600;margin-bottom:4px;">On Writing Well</div>
+            <div style="font-size:12px;color:#7a6f66;margin-bottom:6px;">A guide to clear, concise nonfiction writing</div>
+            <div style="display:flex;justify-content:space-between;font-size:11px;color:#b8a898;">
+              <span>alice-blog.standard.site</span>
+              <span>94% match</span>
+            </div>
+          </div>
+          <div style="background:#fff;border:1px solid #ede8e3;border-radius:10px;padding:16px;margin-bottom:10px;">
+            <div style="font-family:serif;font-size:15px;font-weight:600;margin-bottom:4px;">The Art of Simplicity</div>
+            <div style="font-size:12px;color:#7a6f66;margin-bottom:6px;">Why less is more in digital design</div>
+            <div style="display:flex;justify-content:space-between;font-size:11px;color:#b8a898;">
+              <span>designnotes.standard.site</span>
+              <span>87% match</span>
+            </div>
+          </div>
+          <div style="background:#fff;border:1px solid #ede8e3;border-radius:10px;padding:16px;">
+            <div style="font-family:serif;font-size:15px;font-weight:600;margin-bottom:4px;">Distributed Systems in Practice</div>
+            <div style="font-size:12px;color:#7a6f66;margin-bottom:6px;">Lessons from building real-time infrastructure</div>
+            <div style="display:flex;justify-content:space-between;font-size:11px;color:#b8a898;">
+              <span>eng.standard.site</span>
+              <span>82% match</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A: Stacked Cards</h3>
+      <p>Single column, one card per recommendation. Clean, scannable, mobile-friendly. Each card is a link to the document.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="background:#faf8f5;padding:24px;font-family:'DM Sans',sans-serif;color:#2a2522;">
+        <!-- Mockup B: Compact list -->
+        <div style="max-width:480px;margin:0 auto;">
+          <div style="text-align:center;margin-bottom:16px;">
+            <div style="font-family:serif;font-size:18px;font-weight:600;">Recs for @alice.bsky.social</div>
+          </div>
+          <div style="background:#fff;border:1px solid #ede8e3;border-radius:10px;overflow:hidden;">
+            <div style="padding:14px 16px;border-bottom:1px solid #ede8e3;">
+              <div style="display:flex;justify-content:space-between;align-items:baseline;">
+                <div style="font-family:serif;font-size:14px;font-weight:600;">On Writing Well</div>
+                <div style="font-size:11px;color:#7a6f66;white-space:nowrap;margin-left:12px;">94%</div>
+              </div>
+              <div style="font-size:12px;color:#7a6f66;margin-top:2px;">A guide to clear, concise nonfiction writing</div>
+              <div style="font-size:11px;color:#b8a898;margin-top:2px;">alice-blog.standard.site</div>
+            </div>
+            <div style="padding:14px 16px;border-bottom:1px solid #ede8e3;">
+              <div style="display:flex;justify-content:space-between;align-items:baseline;">
+                <div style="font-family:serif;font-size:14px;font-weight:600;">The Art of Simplicity</div>
+                <div style="font-size:11px;color:#7a6f66;white-space:nowrap;margin-left:12px;">87%</div>
+              </div>
+              <div style="font-size:12px;color:#7a6f66;margin-top:2px;">Why less is more in digital design</div>
+              <div style="font-size:11px;color:#b8a898;margin-top:2px;">designnotes.standard.site</div>
+            </div>
+            <div style="padding:14px 16px;">
+              <div style="display:flex;justify-content:space-between;align-items:baseline;">
+                <div style="font-family:serif;font-size:14px;font-weight:600;">Distributed Systems in Practice</div>
+                <div style="font-size:11px;color:#7a6f66;white-space:nowrap;margin-left:12px;">82%</div>
+              </div>
+              <div style="font-size:12px;color:#7a6f66;margin-top:2px;">Lessons from building real-time infrastructure</div>
+              <div style="font-size:11px;color:#b8a898;margin-top:2px;">eng.standard.site</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B: Compact List</h3>
+      <p>All recommendations in a single grouped card. Denser, more like a reading list. Good for scanning many items quickly.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="background:#faf8f5;padding:24px;font-family:'DM Sans',sans-serif;color:#2a2522;">
+        <!-- Mockup C: Magazine grid -->
+        <div style="max-width:480px;margin:0 auto;">
+          <div style="text-align:center;margin-bottom:16px;">
+            <div style="font-family:serif;font-size:18px;font-weight:600;">Recs for @alice.bsky.social</div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+            <div style="background:#fff;border:1px solid #ede8e3;border-radius:10px;padding:14px;">
+              <div style="font-size:11px;color:#b8a898;margin-bottom:4px;">94% match</div>
+              <div style="font-family:serif;font-size:14px;font-weight:600;margin-bottom:4px;">On Writing Well</div>
+              <div style="font-size:11px;color:#7a6f66;">A guide to clear, concise nonfiction writing</div>
+              <div style="font-size:10px;color:#b8a898;margin-top:6px;">alice-blog.standard.site</div>
+            </div>
+            <div style="background:#fff;border:1px solid #ede8e3;border-radius:10px;padding:14px;">
+              <div style="font-size:11px;color:#b8a898;margin-bottom:4px;">87% match</div>
+              <div style="font-family:serif;font-size:14px;font-weight:600;margin-bottom:4px;">The Art of Simplicity</div>
+              <div style="font-size:11px;color:#7a6f66;">Why less is more in digital design</div>
+              <div style="font-size:10px;color:#b8a898;margin-top:6px;">designnotes.standard.site</div>
+            </div>
+            <div style="background:#fff;border:1px solid #ede8e3;border-radius:10px;padding:14px;">
+              <div style="font-size:11px;color:#b8a898;margin-bottom:4px;">82% match</div>
+              <div style="font-family:serif;font-size:14px;font-weight:600;margin-bottom:4px;">Distributed Systems</div>
+              <div style="font-size:11px;color:#7a6f66;">Lessons from building real-time infra</div>
+              <div style="font-size:10px;color:#b8a898;margin-top:6px;">eng.standard.site</div>
+            </div>
+            <div style="background:#fff;border:1px solid #ede8e3;border-radius:10px;padding:14px;">
+              <div style="font-size:11px;color:#b8a898;margin-bottom:4px;">79% match</div>
+              <div style="font-family:serif;font-size:14px;font-weight:600;margin-bottom:4px;">Weekend Projects</div>
+              <div style="font-size:11px;color:#7a6f66;">Building small things that matter</div>
+              <div style="font-size:10px;color:#b8a898;margin-top:6px;">maker.standard.site</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C: Magazine Grid</h3>
+      <p>Two-column grid, more visual. Each tile is its own card. Collapses to single column on mobile.</p>
+    </div>
+  </div>
+</div>

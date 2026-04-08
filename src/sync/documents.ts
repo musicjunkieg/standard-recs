@@ -1,0 +1,132 @@
+/**
+ * Sync site.standard.document records into D1.
+ * Publisher discovery is handled by discover.ts.
+ */
+
+import { AtpAgent } from "@atproto/api";
+import { seedPublishers, discoverFromSocialGraph } from "./discover.js";
+
+const agent = new AtpAgent({ service: "https://public.api.bsky.app" });
+const COLLECTION = "site.standard.document";
+
+export type DocSyncResult = {
+  discovered: number;
+  fetched: number;
+  stored: number;
+  errors: number;
+};
+
+export async function syncAllDocuments(db: D1Database): Promise<DocSyncResult> {
+  await seedPublishers(db);
+
+  console.log("  Discovering publishers from social graph...");
+  const discovered = await discoverFromSocialGraph(db);
+  console.log(`    ${discovered} new publishers found`);
+
+  const { results: publishers } = await db
+    .prepare(`SELECT did, label FROM publishers`)
+    .all<{ did: string; label: string | null }>();
+
+  console.log(`  Fetching documents from ${publishers.length} publishers...`);
+
+  let totalFetched = 0;
+  let totalStored = 0;
+  let totalErrors = 0;
+
+  for (const pub of publishers) {
+    try {
+      const result = await syncDocumentsFromRepo(db, pub.did);
+      totalFetched += result.fetched;
+      totalStored += result.stored;
+      totalErrors += result.errors;
+      if (result.stored > 0) {
+        console.log(`    ${pub.label ?? pub.did}: ${result.stored} docs`);
+      }
+    } catch (err) {
+      totalErrors++;
+      console.error(`    Failed: ${pub.did}`, err);
+    }
+  }
+
+  return { discovered, fetched: totalFetched, stored: totalStored, errors: totalErrors };
+}
+
+export async function syncDocumentsFromRepo(
+  db: D1Database,
+  did: string,
+): Promise<{ fetched: number; stored: number; errors: number }> {
+  let cursor: string | undefined;
+  let fetched = 0;
+  let stored = 0;
+  let errors = 0;
+
+  while (true) {
+    const res = await agent.com.atproto.repo.listRecords({
+      repo: did,
+      collection: COLLECTION,
+      limit: 100,
+      cursor,
+    });
+
+    const { records, cursor: nextCursor } = res.data;
+    if (!records.length) break;
+
+    const stmts: D1PreparedStatement[] = [];
+
+    for (const record of records) {
+      fetched++;
+      try {
+        const doc = record.value as StandardDocument;
+        const textContent = doc.textContent?.trim() || doc.description?.trim() || doc.title || null;
+
+        stmts.push(
+          db.prepare(
+            `INSERT OR REPLACE INTO documents
+              (uri, did, site, title, path, description, text_content, tags, published_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).bind(
+            record.uri, did, doc.site ?? null, doc.title,
+            doc.path ?? null, doc.description ?? null, textContent,
+            doc.tags ? JSON.stringify(doc.tags) : null, doc.publishedAt ?? null,
+          ),
+        );
+        stored++;
+      } catch (err) {
+        errors++;
+        console.error(`Failed to parse document ${record.uri}:`, err);
+      }
+    }
+
+    if (stmts.length > 0) {
+      try { await db.batch(stmts); } catch (err) {
+        errors += stmts.length;
+        console.error(`Batch insert failed for ${did}:`, err);
+      }
+    }
+
+    if (!nextCursor) break;
+    cursor = nextCursor;
+    await sleep(250);
+  }
+
+  return { fetched, stored, errors };
+}
+
+type StandardDocument = {
+  $type: "site.standard.document";
+  site: string;
+  title: string;
+  publishedAt: string;
+  path?: string;
+  description?: string;
+  textContent?: string;
+  content?: unknown;
+  tags?: string[];
+  updatedAt?: string;
+  coverImage?: unknown;
+  bskyPostRef?: unknown;
+};
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
