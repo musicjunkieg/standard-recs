@@ -55,3 +55,15 @@ CREATE TABLE IF NOT EXISTS publishers (
   label TEXT,
   added_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS oauth_state (
+  key TEXT PRIMARY KEY,
+  state TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS oauth_sessions (
+  did TEXT PRIMARY KEY,
+  session TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

@@ -14,6 +14,7 @@ export type Env = {
 
   // Secrets
   VOYAGE_API_KEY: string;
+  OAUTH_PRIVATE_KEY: string;
 
   // Config vars
   SYNC_BATCH_SIZE: string;
