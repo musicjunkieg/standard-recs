@@ -8,7 +8,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Env } from "../env.js";
-import { createOAuthClient, CLIENT_METADATA } from "../oauth/client.js";
+import { createOAuthClient, buildClientMetadata } from "../oauth/client.js";
 import { Agent } from "@atproto/api";
 import { listUsers } from "../sync/users.js";
 import { enrollPage } from "./enroll-page.js";
@@ -251,7 +251,7 @@ api.get("/admin/jetstream/status", async (c) => {
 
 // OAuth client metadata (required by AT Protocol OAuth)
 api.get("/oauth/client-metadata.json", (c) => {
-  return c.json(CLIENT_METADATA);
+  return c.json(buildClientMetadata(c.env.WORKER_URL));
 });
 
 // OAuth JWKS (public keys for client authentication)
@@ -274,13 +274,15 @@ api.get("/oauth/callback", async (c) => {
     const profile = await agent.getProfile({ actor: did });
     const handle = profile.data.handle;
 
-    // Create/update user
-    await c.env.DB.prepare(
-      `INSERT INTO users (did, handle) VALUES (?, ?)
-       ON CONFLICT(did) DO UPDATE SET handle = excluded.handle`,
-    )
-      .bind(did, handle)
-      .run();
+    // Clear stale handle mapping (if another DID previously owned this handle)
+    // then upsert the user. DID is the stable identity; handles can move.
+    await c.env.DB.batch([
+      c.env.DB.prepare(`UPDATE users SET handle = '' WHERE handle = ? AND did != ?`).bind(handle, did),
+      c.env.DB.prepare(
+        `INSERT INTO users (did, handle) VALUES (?, ?)
+         ON CONFLICT(did) DO UPDATE SET handle = excluded.handle`,
+      ).bind(did, handle),
+    ]);
 
     // Kick off user-mode Workflow for initial likes sync
     await c.env.SYNC_PIPELINE.create({

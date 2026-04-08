@@ -20,4 +20,5 @@ export type Env = {
   SYNC_BATCH_SIZE: string;
   WINDOW_DAYS: string;
   TOP_N: string;
+  WORKER_URL: string;
 };

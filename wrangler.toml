@@ -56,6 +56,7 @@ new_classes = ["JetstreamListener"]
 SYNC_BATCH_SIZE = "50"
 WINDOW_DAYS = "30"
 TOP_N = "10"
+WORKER_URL = "https://standard-recs.bryan-78d.workers.dev"
 
 # Secret (set via CLI):
 #   wrangler secret put VOYAGE_API_KEY

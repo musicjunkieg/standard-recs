@@ -25,10 +25,17 @@ export function createStateStore(db: D1Database): WorkersSavedStateStore {
     },
     async get(key: string) {
       const row = await db
-        .prepare(`SELECT state FROM oauth_state WHERE key = ?`)
+        .prepare(`SELECT state, created_at FROM oauth_state WHERE key = ?`)
         .bind(key)
-        .first<{ state: string }>();
-      return row ? JSON.parse(row.state) : undefined;
+        .first<{ state: string; created_at: string }>();
+      if (!row) return undefined;
+      // Expire state older than 15 minutes
+      const age = Date.now() - new Date(row.created_at + "Z").getTime();
+      if (age > 15 * 60 * 1000) {
+        await db.prepare(`DELETE FROM oauth_state WHERE key = ?`).bind(key).run();
+        return undefined;
+      }
+      return JSON.parse(row.state);
     },
     async del(key: string) {
       await db

@@ -126,6 +126,11 @@ export async function syncAllLikes(
     } catch (err) {
       console.error(`    Failed (session restore or sync): ${user.handle}`, err);
       results.push({ user: user.did, fetched: 0, stored: 0, errors: 1 });
+      // Advance scheduling so this user doesn't block the queue
+      await env.DB
+        .prepare(`UPDATE users SET last_synced_at = datetime('now') WHERE did = ?`)
+        .bind(user.did)
+        .run();
     }
   }
 
