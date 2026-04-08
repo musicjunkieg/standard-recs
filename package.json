@@ -11,6 +11,9 @@
   },
   "dependencies": {
     "@atproto/api": "^0.15.0",
+    "@atproto/jwk-webcrypto": "^0.2.0",
+    "@atproto/oauth-client": "^0.6.0",
+    "atproto-oauth-client-cloudflare-workers": "^0.2.2",
     "hono": "^4.0.0"
   },
   "devDependencies": {

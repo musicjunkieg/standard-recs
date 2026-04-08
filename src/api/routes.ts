@@ -250,6 +250,46 @@ api.get("/admin/jetstream/status", async (c) => {
   return c.json(data);
 });
 
+// OAuth client metadata (required by AT Protocol OAuth)
+api.get("/oauth/client-metadata.json", (c) => {
+  const base = "https://standard-recs.bryan-78d.workers.dev";
+  return c.json({
+    client_id: `${base}/oauth/client-metadata.json`,
+    client_name: "standard-recs",
+    client_uri: base,
+    redirect_uris: [`${base}/oauth/callback`],
+    scope: "atproto transition:generic",
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+    application_type: "web",
+    token_endpoint_auth_method: "private_key_jwt",
+    token_endpoint_auth_signing_alg: "ES256",
+    dpop_bound_access_tokens: true,
+    jwks_uri: `${base}/oauth/jwks.json`,
+  });
+});
+
+// OAuth JWKS (public keys for client authentication)
+api.get("/oauth/jwks.json", async (c) => {
+  // Spike: generate a key just to serve the JWKS
+  // Real impl will use a persistent key from secrets
+  const { JoseKey } = await import("@atproto/jwk-jose");
+  const key = await JoseKey.generate(["ES256"], "key-1");
+  return c.json({ keys: [key.publicJwk] });
+});
+
+// OAuth callback placeholder
+api.get("/oauth/callback", (c) => {
+  return c.text("OAuth callback - not yet implemented");
+});
+
+// OAuth spike test (temporary)
+api.get("/admin/oauth-spike", async (c) => {
+  const { spikeTest } = await import("../oauth/spike.js");
+  const result = await spikeTest(c.env);
+  return c.json(result);
+});
+
 // Add a publisher manually (optional seed)
 api.post("/admin/add-publisher", async (c) => {
   const body = await c.req.json<{ did: string; label?: string }>();
