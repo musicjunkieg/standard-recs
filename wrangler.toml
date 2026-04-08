@@ -59,3 +59,4 @@ TOP_N = "10"
 
 # Secret (set via CLI):
 #   wrangler secret put VOYAGE_API_KEY
+#   wrangler secret put OAUTH_PRIVATE_KEY
