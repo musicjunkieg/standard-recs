@@ -48,13 +48,18 @@ api.get("/enroll", async (c) => {
   try {
     const client = await createOAuthClient(c.env);
 
-    // Try granular scope first; fall back to transition:generic if PDS rejects it
+    // Try granular scope first; fall back to transition:generic only on scope rejection
     let url: URL;
     try {
       url = await client.authorize(handle, {
         scope: "atproto rpc:app.bsky.feed.getActorLikes?aud=*",
       });
-    } catch {
+    } catch (scopeErr) {
+      const isScopeRejection =
+        scopeErr instanceof Error &&
+        "error" in scopeErr &&
+        (scopeErr as { error?: string }).error === "invalid_scope";
+      if (!isScopeRejection) throw scopeErr;
       console.warn("Granular scope rejected, falling back to transition:generic");
       url = await client.authorize(handle, {
         scope: "atproto transition:generic",
