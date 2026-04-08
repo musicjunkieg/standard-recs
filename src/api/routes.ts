@@ -49,7 +49,7 @@ api.post("/enroll", async (c) => {
 
     // Trigger a Workflow to backfill this user's likes
     await c.env.SYNC_PIPELINE.create({
-      id: `enroll-${result.did}-${Date.now()}`,
+      id: `enroll-${result.did.replace(/:/g, "-")}-${Date.now()}`,
       params: { mode: "user" as const, did: result.did },
     });
 
@@ -216,7 +216,7 @@ api.post("/admin/sync-user/:did", async (c) => {
   }
 
   const instance = await c.env.SYNC_PIPELINE.create({
-    id: `user-${did}-${Date.now()}`,
+    id: `user-${did.replace(/:/g, "-")}-${Date.now()}`,
     params: { mode: "user" as const, did },
   });
 
