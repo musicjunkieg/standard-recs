@@ -23,7 +23,7 @@ crons = ["0 6 * * *"]  # Daily at 6am UTC
 [[d1_databases]]
 binding = "DB"
 database_name = "standard-recs-db"
-database_id = "YOUR_D1_DATABASE_ID"
+database_id = "ddbe904c-ad5c-46f2-bcc6-7f64429d57e4"
 
 # ─── Vectorize ───
 
