@@ -10,14 +10,14 @@ Replace the unauthenticated `getActorLikes` call (which fails because Bluesky ma
 - **Client metadata served from the worker** at `/oauth/client-metadata.json` — no custom domain needed
 - **Granular scope:** `atproto rpc:app.bsky.feed.getActorLikes?aud=*` — read likes only, works with any PDS/appview
 - **Session storage in D1** — new `oauth_state` and `oauth_sessions` tables
-- **`@atproto/oauth-client`** base SDK (runtime-agnostic) with `@atproto/jwk-webcrypto` for signing keys — the `-node` variant uses `node:crypto` and `node:dns` which may not work under Workers' `nodejs_compat`. The base package uses Web Crypto API (`crypto.subtle`) which is natively available in Workers.
+- **`atproto-oauth-client-cloudflare-workers`** (`WorkersOAuthClient`) — a Workers-compatible fork of the AT Protocol OAuth client. Patches two fetch incompatibilities (`request.cache` and `request.redirect`) that prevent the standard SDK from working on the edge runtime. Uses `@atproto/jwk-jose` for key handling. Validated in a spike: client creation and `authorize()` succeed on deployed Workers. Requires `nodejs_compat` for DNS-based handle resolution.
 - **Scope fallback:** If `rpc:app.bsky.feed.getActorLikes?aud=*` is not accepted by the target PDS, fall back to `atproto transition:generic`. Document this as a known constraint — narrow scope when granular scopes are widely adopted.
 
 ## OAuth Flow
 
 1. User enters handle on enrollment page, selects from typeahead
 2. Page navigates to `GET /enroll?handle=chaosgreml.in` (no longer an AJAX POST)
-3. Server creates an `OAuthClient`, calls `client.authorize(handle)` which resolves the user's PDS and returns an auth URL
+3. Server creates a `WorkersOAuthClient`, calls `client.authorize(handle)` which resolves the user's PDS and returns an auth URL
 4. Server redirects user to the auth URL (their PDS's authorization page)
 5. User sees "standard-recs wants to read your likes", approves
 6. PDS redirects to `GET /oauth/callback?code=...&state=...&iss=...`
@@ -112,24 +112,18 @@ Set via `wrangler secret put OAUTH_PRIVATE_KEY` (or Cloudflare API).
 
 ## New Dependencies
 
-- `@atproto/oauth-client` — AT Protocol OAuth client (runtime-agnostic base package)
-- `@atproto/jwk-webcrypto` — Web Crypto API key handling (Workers-native, no `node:crypto` dependency)
+- `atproto-oauth-client-cloudflare-workers` — Workers-compatible AT Protocol OAuth client (drop-in replacement for `NodeOAuthClient`). Includes `@atproto/jwk-jose` for key handling.
 
-## OAuthClient Configuration
+The `@atproto/oauth-client` and `@atproto/jwk-webcrypto` packages from the spike can be removed — the Workers-specific package bundles everything needed.
 
-The base `@atproto/oauth-client` requires a `runtimeImplementation` object since it does not bundle platform-specific crypto. For Workers:
+## WorkersOAuthClient Configuration
 
-- **`createKey`** — use `WebcryptoKey.fromJsonWebKeySet()` from `@atproto/jwk-webcrypto`. This uses `crypto.subtle.importKey()` which is native in Workers.
-- **`getRandomValues`** — use `crypto.getRandomValues()` (native in Workers)
-- **`digest`** — use `crypto.subtle.digest()` (native in Workers)
-- **`requestLock`** — use an in-memory lock (single Worker instance per request; no cross-instance coordination needed)
+The `WorkersOAuthClient` from `atproto-oauth-client-cloudflare-workers` handles `runtimeImplementation` automatically (including DPoP key generation, random values, digest, and handle resolution via DNS with `nodejs_compat`). Constructor parameters:
 
-Additional constructor parameters:
-
-- **`handleResolver`** — URL of a service implementing `com.atproto.identity.resolveHandle`. Use `https://public.api.bsky.app` (the public Bluesky API works for handle resolution even though it doesn't work for likes).
-- **`keyset`** — the private signing key loaded from the `OAUTH_PRIVATE_KEY` secret via `WebcryptoKey.fromJWK()` from `@atproto/jwk-webcrypto`.
-- **`clientMetadata`** — the client metadata object (same as served at `/oauth/client-metadata.json`).
-- **`stateStore`** and **`sessionStore`** — D1-backed implementations (see `src/oauth/stores.ts`).
+- **`clientMetadata`** — the client metadata object (same as served at `/oauth/client-metadata.json`)
+- **`keyset`** — array containing the private signing key loaded from `OAUTH_PRIVATE_KEY` secret via `JoseKey.fromImportable()` from `@atproto/jwk-jose`
+- **`stateStore`** — D1-backed implementation of `WorkersSavedStateStore` (implements `set`, `get`, `del`)
+- **`sessionStore`** — D1-backed implementation of `WorkersSavedSessionStore` (implements `set`, `get`, `del`)
 
 ### Scope Strategy
 
@@ -154,8 +148,8 @@ The Workflow steps that call `syncUserLikes` and `syncAllLikes` need to pass D1 
 
 | File | Purpose |
 |------|---------|
-| `src/oauth/client.ts` | Factory function to create `OAuthClient` with D1-backed stores, Workers-native `runtimeImplementation`, handle resolver, and keyset |
-| `src/oauth/stores.ts` | D1 implementations of `stateStore` and `sessionStore` interfaces (each implements `set`, `get`, `del`) |
+| `src/oauth/client.ts` | Factory function to create `WorkersOAuthClient` with D1-backed stores and keyset from env |
+| `src/oauth/stores.ts` | D1 implementations of `WorkersSavedStateStore` and `WorkersSavedSessionStore` (each implements `set`, `get`, `del`) |
 
 ## Changed Files
 
@@ -168,7 +162,7 @@ The Workflow steps that call `syncUserLikes` and `syncAllLikes` need to pass D1 
 | `src/env.ts` | Add `OAUTH_PRIVATE_KEY` to Env type |
 | `schema.sql` | Add `oauth_state` and `oauth_sessions` tables |
 | `wrangler.toml` | Add `nodejs_compat` if not already present |
-| `package.json` | Add `@atproto/oauth-client` and `@atproto/jwk-webcrypto` |
+| `package.json` | Add `atproto-oauth-client-cloudflare-workers`, remove `@atproto/oauth-client` and `@atproto/jwk-webcrypto` |
 
 ## Enrollment Page Changes
 
@@ -194,6 +188,6 @@ The enrollment page (`src/api/enroll-page.ts`) changes minimally:
 ## Edge Cases
 
 - **User revokes access:** The session restore will fail. The cron skips that user and logs the error. The user would need to re-enroll.
-- **Token refresh failure:** The `@atproto/oauth-client` SDK handles refresh automatically. If refresh fails permanently, same as revocation — skip and log.
+- **Token refresh failure:** The SDK handles refresh automatically. If refresh fails permanently, same as revocation — skip and log.
 - **User on self-hosted PDS:** Works because we use `aud=*` and the SDK auto-discovers the user's PDS from their DID.
-- **Cloudflare Workers compatibility:** Uses `@atproto/oauth-client` (base, runtime-agnostic) with `@atproto/jwk-webcrypto` which uses Web Crypto API (`crypto.subtle`) — fully native in Workers. No `node:crypto` or `node:dns` dependencies. The `nodejs_compat` flag is still present for `@atproto/api` usage elsewhere.
+- **Cloudflare Workers compatibility:** Validated via spike. Uses `atproto-oauth-client-cloudflare-workers` which patches two fetch incompatibilities (`request.cache` and `request.redirect`). Requires `nodejs_compat` for DNS handle resolution.
