@@ -343,10 +343,22 @@ export const enrollPage = `<!DOCTYPE html>
 
         if (data.enrolled) {
           resultBox.className = 'result success';
-          resultBox.innerHTML =
-            '<h3>You\\'re in!</h3>'
-            + '<p>We\\'re syncing your likes now. Check back for your recommendations.</p>'
-            + '<p class="did">' + esc(data.did) + '</p>';
+          resultBox.textContent = '';
+          var h3 = document.createElement('h3');
+          h3.textContent = "You're in!";
+          resultBox.appendChild(h3);
+          var p = document.createElement('p');
+          p.textContent = "We're syncing your likes now. ";
+          var link = document.createElement('a');
+          link.href = data.recsUrl;
+          link.style.cssText = 'color:#2a4a2a;font-weight:500';
+          link.textContent = 'View your recommendations';
+          p.appendChild(link);
+          resultBox.appendChild(p);
+          var didP = document.createElement('p');
+          didP.className = 'did';
+          didP.textContent = data.did;
+          resultBox.appendChild(didP);
         } else {
           throw new Error(data.error || 'Unknown error');
         }
