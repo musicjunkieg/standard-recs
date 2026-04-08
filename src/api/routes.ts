@@ -10,6 +10,8 @@ import { cors } from "hono/cors";
 import type { Env } from "../env.js";
 import { enrollUser, listUsers } from "../sync/users.js";
 import { enrollPage } from "./enroll-page.js";
+import { recsPage } from "./recs-page.js";
+import { recsLookupPage } from "./recs-lookup-page.js";
 
 const api = new Hono<{ Bindings: Env }>();
 
@@ -55,6 +57,7 @@ api.post("/enroll", async (c) => {
       enrolled: true,
       did: result.did,
       handle: result.handle,
+      recsUrl: `/recs/${result.did}`,
       note: "Syncing your likes now. Recommendations will appear shortly.",
     });
   } catch (err) {
@@ -66,9 +69,30 @@ api.post("/enroll", async (c) => {
   }
 });
 
-// Get recommendations for a user
+// Recs lookup page
+api.get("/recs", (c) => c.html(recsLookupPage));
+
+// Resolve handle → DID and redirect to recs page
+api.get("/recs/by-handle/:handle", async (c) => {
+  const handle = c.req.param("handle");
+
+  const user = await c.env.DB.prepare(
+    `SELECT did FROM users WHERE handle = ?`,
+  )
+    .bind(handle)
+    .first<{ did: string }>();
+
+  if (!user) {
+    return c.html(recsPage({ state: "not_found" }), 404);
+  }
+
+  return c.redirect(`/recs/${user.did}`);
+});
+
+// Get recommendations for a user (content-negotiated: HTML for browsers, JSON for API)
 api.get("/recs/:did", async (c) => {
   const did = c.req.param("did");
+  const wantsHtml = c.req.header("Accept")?.includes("text/html");
 
   const user = await c.env.DB.prepare(
     `SELECT did, handle FROM users WHERE did = ?`,
@@ -77,6 +101,9 @@ api.get("/recs/:did", async (c) => {
     .first<{ did: string; handle: string }>();
 
   if (!user) {
+    if (wantsHtml) {
+      return c.html(recsPage({ state: "not_found" }), 404);
+    }
     return c.json({ error: "User not enrolled" }, 404);
   }
 
@@ -90,6 +117,24 @@ api.get("/recs/:did", async (c) => {
   )
     .bind(did)
     .all();
+
+  if (wantsHtml) {
+    return c.html(
+      recsPage({
+        state: "found",
+        handle: user.handle,
+        did: user.did,
+        recs: recs.map((r: Record<string, unknown>) => ({
+          uri: r.document_uri as string,
+          score: r.score as number,
+          title: r.title as string,
+          description: r.description as string | null,
+          url: buildDocumentUrl(r.site as string | null, r.path as string | null),
+          site: r.site as string | null,
+        })),
+      }),
+    );
+  }
 
   return c.json({
     did: user.did,
