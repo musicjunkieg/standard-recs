@@ -42,7 +42,12 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
     const topN = parseInt(this.env.TOP_N || "10", 10);
 
     const likeResult = await step.do(`sync-likes-${did}`, async () => {
-      const result = await syncUserLikes(this.env.DB, did, windowDays);
+      const { createOAuthClient } = await import("./oauth/client.js");
+      const { Agent } = await import("@atproto/api");
+      const client = await createOAuthClient(this.env);
+      const session = await client.restore(did);
+      const agent = new Agent(session);
+      const result = await syncUserLikes(this.env.DB, agent, did, windowDays);
       return { stored: result.stored, fetched: result.fetched };
     });
 
@@ -86,7 +91,7 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
 
     // Step 1: Sync likes for all users
     const likeResults = await step.do("sync-all-likes", async () => {
-      const results = await syncAllLikes(this.env.DB, windowDays, batchSize);
+      const results = await syncAllLikes(this.env, windowDays, batchSize);
       const totalNew = results.reduce((a, r) => a + r.stored, 0);
       return { users: results.length, newLikes: totalNew };
     });
@@ -99,6 +104,14 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
     });
 
     console.log(`Pruned: ${pruned} stale likes`);
+
+    // Clean up abandoned OAuth authorization flows (older than 15 min)
+    await step.do("cleanup-oauth-state", async () => {
+      const result = await this.env.DB
+        .prepare(`DELETE FROM oauth_state WHERE created_at < datetime('now', '-15 minutes')`)
+        .run();
+      return result.meta.changes ?? 0;
+    });
 
     // Step 3: Discover publishers + sync documents
     const docResult = await step.do("sync-documents", async () => {
