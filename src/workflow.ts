@@ -155,6 +155,6 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       console.log("Skipping embed + recommend — VOYAGE_API_KEY not set");
     }
 
-    return { likeResults, pruned, docResult };
+    return { likeResults, pruned, pruneResult, docResult };
   }
 }

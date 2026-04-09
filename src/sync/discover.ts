@@ -167,11 +167,18 @@ export async function pruneInvalidPublishers(
       .bind(pub.did)
       .all<{ uri: string }>();
 
+    // Delete vectors first. If any chunk fails after retry, skip this
+    // publisher entirely to avoid orphaning vectors with no D1 row.
     if (docs.length > 0) {
-      try {
-        await vectors.deleteByIds(docs.map((d) => d.uri));
-      } catch (err) {
-        console.error(`    Vectorize delete failed for ${pub.did}:`, err);
+      const uris = docs.map((d) => d.uri);
+      const ok = await deleteVectorsChunked(vectors, uris);
+      if (!ok) {
+        skipped++;
+        console.error(
+          `    skipping ${pub.did}: vector delete failed, will retry next cron`,
+        );
+        await sleep(100);
+        continue;
       }
     }
 
@@ -192,4 +199,31 @@ export async function pruneInvalidPublishers(
   }
 
   return { checked: publishers.length, removed, skipped };
+}
+
+/**
+ * Delete vectors in chunks with one retry per chunk. Returns true on full
+ * success, false if any chunk failed both attempts.
+ */
+async function deleteVectorsChunked(
+  vectors: VectorizeIndex,
+  ids: string[],
+): Promise<boolean> {
+  const CHUNK_SIZE = 100;
+  for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+    const chunk = ids.slice(i, i + CHUNK_SIZE);
+    try {
+      await vectors.deleteByIds(chunk);
+    } catch (err) {
+      console.warn(`    Vectorize delete chunk failed, retrying:`, err);
+      await sleep(500);
+      try {
+        await vectors.deleteByIds(chunk);
+      } catch (retryErr) {
+        console.error(`    Vectorize delete chunk failed after retry:`, retryErr);
+        return false;
+      }
+    }
+  }
+  return true;
 }

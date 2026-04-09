@@ -166,8 +166,14 @@ export class JetstreamListener extends DurableObject<Env> {
     msg: { commit?: { rkey?: string; record?: unknown } },
   ): Promise<void> {
     const rkey = msg.commit?.rkey;
-    const record = msg.commit?.record as StandardDocument | undefined;
-    if (!rkey || !record) return;
+    const rawRecord = msg.commit?.record;
+    if (!rkey) return;
+
+    const record = validateStandardDocument(rawRecord);
+    if (!record) {
+      console.warn(`Jetstream: invalid document record from ${did}/${rkey}`);
+      return;
+    }
 
     // Only insert documents from known publishers
     const known = await this.env.DB
@@ -184,4 +190,20 @@ export class JetstreamListener extends DurableObject<Env> {
       // D1 write failed — non-fatal
     }
   }
+}
+
+/**
+ * Validate a Jetstream record payload as a StandardDocument.
+ * Returns the typed record on success, null on failure.
+ *
+ * Required fields per the site.standard.document lexicon: site, title,
+ * publishedAt. Other fields are optional and handled by upsertDocumentStmt.
+ */
+function validateStandardDocument(record: unknown): StandardDocument | null {
+  if (!record || typeof record !== "object") return null;
+  const r = record as Record<string, unknown>;
+  if (typeof r.site !== "string" || !r.site) return null;
+  if (typeof r.title !== "string" || !r.title) return null;
+  if (typeof r.publishedAt !== "string" || !r.publishedAt) return null;
+  return r as unknown as StandardDocument;
 }
