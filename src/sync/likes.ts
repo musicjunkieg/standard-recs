@@ -5,9 +5,9 @@
  * resolves each liked post's text, and stores it.
  */
 
-import { AtpAgent } from "@atproto/api";
-
-const agent = new AtpAgent({ service: "https://public.api.bsky.app" });
+import { Agent } from "@atproto/api";
+import type { Env } from "../env.js";
+import { createOAuthClient } from "../oauth/client.js";
 
 export type SyncResult = {
   user: string;
@@ -21,6 +21,7 @@ export type SyncResult = {
  */
 export async function syncUserLikes(
   db: D1Database,
+  agent: Agent,
   did: string,
   windowDays: number,
 ): Promise<SyncResult> {
@@ -98,11 +99,11 @@ export async function syncUserLikes(
  * Sync likes for all enrolled users.
  */
 export async function syncAllLikes(
-  db: D1Database,
+  env: Env,
   windowDays: number,
   batchSize: number,
 ): Promise<SyncResult[]> {
-  const { results: users } = await db
+  const { results: users } = await env.DB
     .prepare(
       `SELECT did, handle FROM users ORDER BY last_synced_at ASC NULLS FIRST LIMIT ?`,
     )
@@ -111,17 +112,25 @@ export async function syncAllLikes(
 
   console.log(`Syncing likes for ${users.length} users`);
 
+  const client = await createOAuthClient(env);
   const results: SyncResult[] = [];
 
   for (const user of users) {
     console.log(`  → ${user.handle}`);
     try {
-      const result = await syncUserLikes(db, user.did, windowDays);
+      const session = await client.restore(user.did);
+      const agent = new Agent(session);
+      const result = await syncUserLikes(env.DB, agent, user.did, windowDays);
       results.push(result);
       console.log(`    ${result.stored} new (${result.fetched} checked)`);
     } catch (err) {
-      console.error(`    Failed: ${user.handle}`, err);
+      console.error(`    Failed (session restore or sync): ${user.handle}`, err);
       results.push({ user: user.did, fetched: 0, stored: 0, errors: 1 });
+      // Advance scheduling so this user doesn't block the queue
+      await env.DB
+        .prepare(`UPDATE users SET last_synced_at = datetime('now') WHERE did = ?`)
+        .bind(user.did)
+        .run();
     }
   }
 

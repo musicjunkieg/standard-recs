@@ -2,28 +2,6 @@
  * Enroll and manage users.
  */
 
-import { AtpAgent } from "@atproto/api";
-
-const agent = new AtpAgent({ service: "https://public.api.bsky.app" });
-
-/**
- * Enroll a user by handle. Resolves handle → DID and stores it.
- */
-export async function enrollUser(
-  db: D1Database,
-  handle: string,
-): Promise<{ did: string; handle: string }> {
-  const res = await agent.resolveHandle({ handle });
-  const did = res.data.did;
-
-  await db
-    .prepare(`INSERT OR IGNORE INTO users (did, handle) VALUES (?, ?)`)
-    .bind(did, handle)
-    .run();
-
-  return { did, handle };
-}
-
 /**
  * List all enrolled users.
  */

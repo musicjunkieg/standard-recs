@@ -144,46 +144,6 @@ export const enrollPage = `<!DOCTYPE html>
       margin-bottom: 1.5rem;
     }
 
-    .result {
-      padding: 1.25rem;
-      border-radius: 10px;
-      margin-top: 1rem;
-      display: none;
-    }
-
-    .result.success {
-      display: block;
-      background: #eef6ee;
-      border: 1px solid #c4dfc4;
-      color: #2a4a2a;
-    }
-
-    .result.error {
-      display: block;
-      background: #f9eeed;
-      border: 1px solid #dfc4c4;
-      color: #4a2a2a;
-    }
-
-    .result h3 {
-      font-family: 'Newsreader', serif;
-      font-size: 1.1rem;
-      margin-bottom: 0.35rem;
-    }
-
-    .result p {
-      font-size: 0.85rem;
-      line-height: 1.5;
-    }
-
-    .result .did {
-      font-size: 0.75rem;
-      color: #5a7a5a;
-      word-break: break-all;
-      margin-top: 0.35rem;
-      font-family: monospace;
-    }
-
     .spinner {
       display: none;
       width: 18px;
@@ -233,12 +193,11 @@ export const enrollPage = `<!DOCTYPE html>
     </div>
 
     <p class="note">
-      We'll look at your public likes from the last 30 days and match you
-      with long-form writing published on Standard.site. Your recommendations
+      We'll ask permission to read your likes from the last 30 days and
+      match you with long-form writing published on Standard.site. Your recommendations
       page will be public.
     </p>
 
-    <div id="result"></div>
   </div>
 
   <footer>
@@ -252,11 +211,20 @@ export const enrollPage = `<!DOCTYPE html>
     const input = document.getElementById('handle-input');
     const sugBox = document.getElementById('suggestions');
     const spinner = document.getElementById('spinner');
-    const resultBox = document.getElementById('result');
 
     let debounce = null;
     let selectedIdx = -1;
     let actors = [];
+
+    // Show error from OAuth redirect
+    const urlError = new URLSearchParams(window.location.search).get('error');
+    if (urlError === 'resolve_failed') {
+      input.placeholder = 'Could not resolve that handle. Try again...';
+      input.style.borderColor = '#dfc4c4';
+    } else if (urlError === 'auth_failed') {
+      input.placeholder = 'Authorization failed. Try again...';
+      input.style.borderColor = '#dfc4c4';
+    }
 
     input.addEventListener('input', () => {
       clearTimeout(debounce);
@@ -332,45 +300,7 @@ export const enrollPage = `<!DOCTYPE html>
       input.value = '@' + actor.handle;
       input.disabled = true;
       spinner.classList.add('active');
-
-      try {
-        const res = await fetch('/enroll', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ handle: actor.handle }),
-        });
-        const data = await res.json();
-
-        if (data.enrolled) {
-          resultBox.className = 'result success';
-          resultBox.textContent = '';
-          var h3 = document.createElement('h3');
-          h3.textContent = "You're in!";
-          resultBox.appendChild(h3);
-          var p = document.createElement('p');
-          p.textContent = "We're syncing your likes now. ";
-          var link = document.createElement('a');
-          link.href = data.recsUrl;
-          link.style.cssText = 'color:#2a4a2a;font-weight:500';
-          link.textContent = 'View your recommendations';
-          p.appendChild(link);
-          resultBox.appendChild(p);
-          var didP = document.createElement('p');
-          didP.className = 'did';
-          didP.textContent = data.did;
-          resultBox.appendChild(didP);
-        } else {
-          throw new Error(data.error || 'Unknown error');
-        }
-      } catch (err) {
-        resultBox.className = 'result error';
-        resultBox.innerHTML =
-          '<h3>Something went wrong</h3>'
-          + '<p>' + esc(err.message) + '</p>';
-      } finally {
-        spinner.classList.remove('active');
-        input.disabled = false;
-      }
+      window.location.href = '/enroll?handle=' + encodeURIComponent(actor.handle);
     }
 
     function esc(s) {

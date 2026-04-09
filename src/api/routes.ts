@@ -8,7 +8,9 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Env } from "../env.js";
-import { enrollUser, listUsers } from "../sync/users.js";
+import { createOAuthClient, buildClientMetadata } from "../oauth/client.js";
+import { Agent } from "@atproto/api";
+import { listUsers } from "../sync/users.js";
 import { enrollPage } from "./enroll-page.js";
 import { recsPage } from "./recs-page.js";
 import { recsLookupPage } from "./recs-lookup-page.js";
@@ -28,44 +30,46 @@ api.get("/api", (c) => {
     name: "standard-recs",
     description: "Recommend Standard.site documents based on your Bluesky likes",
     endpoints: {
-      "POST /enroll": "Enroll with { handle }",
+      "GET /enroll?handle=": "Enroll via OAuth (redirects to PDS)",
       "GET /recs/:did": "Get recommendations for a DID",
       "GET /stats": "Database stats",
     },
   });
 });
 
-// Enroll a user — resolves handle, stores user, kicks off Workflow
-api.post("/enroll", async (c) => {
-  const body = await c.req.json<{ handle?: string }>();
-  const handle = body.handle?.trim();
+// Enroll — initiates OAuth flow by redirecting user to their PDS
+api.get("/enroll", async (c) => {
+  const handle = c.req.query("handle")?.trim();
 
   if (!handle) {
-    return c.json({ error: "handle is required" }, 400);
+    return c.redirect("/?error=resolve_failed");
   }
 
   try {
-    const result = await enrollUser(c.env.DB, handle);
+    const client = await createOAuthClient(c.env);
 
-    // Trigger a Workflow to backfill this user's likes
-    await c.env.SYNC_PIPELINE.create({
-      id: `enroll-${result.did.replace(/:/g, "-")}-${Date.now()}`,
-      params: { mode: "user" as const, did: result.did },
-    });
+    // Try granular scope first; fall back to transition:generic only on scope rejection
+    let url: URL;
+    try {
+      url = await client.authorize(handle, {
+        scope: "atproto rpc:app.bsky.feed.getActorLikes?aud=*",
+      });
+    } catch (scopeErr) {
+      const isScopeRejection =
+        scopeErr instanceof Error &&
+        "error" in scopeErr &&
+        (scopeErr as { error?: string }).error === "invalid_scope";
+      if (!isScopeRejection) throw scopeErr;
+      console.warn("Granular scope rejected, falling back to transition:generic");
+      url = await client.authorize(handle, {
+        scope: "atproto transition:generic",
+      });
+    }
 
-    return c.json({
-      enrolled: true,
-      did: result.did,
-      handle: result.handle,
-      recsUrl: `/recs/${result.did}`,
-      note: "Syncing your likes now. Recommendations will appear shortly.",
-    });
+    return c.redirect(url.toString());
   } catch (err) {
-    console.error("Enrollment failed:", err);
-    return c.json(
-      { error: "Failed to resolve handle. Is it a valid Bluesky handle?" },
-      400,
-    );
+    console.error("OAuth authorize failed:", err);
+    return c.redirect("/?error=resolve_failed");
   }
 });
 
@@ -252,42 +256,50 @@ api.get("/admin/jetstream/status", async (c) => {
 
 // OAuth client metadata (required by AT Protocol OAuth)
 api.get("/oauth/client-metadata.json", (c) => {
-  const base = "https://standard-recs.bryan-78d.workers.dev";
-  return c.json({
-    client_id: `${base}/oauth/client-metadata.json`,
-    client_name: "standard-recs",
-    client_uri: base,
-    redirect_uris: [`${base}/oauth/callback`],
-    scope: "atproto transition:generic",
-    grant_types: ["authorization_code", "refresh_token"],
-    response_types: ["code"],
-    application_type: "web",
-    token_endpoint_auth_method: "private_key_jwt",
-    token_endpoint_auth_signing_alg: "ES256",
-    dpop_bound_access_tokens: true,
-    jwks_uri: `${base}/oauth/jwks.json`,
-  });
+  return c.json(buildClientMetadata(c.env.WORKER_URL));
 });
 
 // OAuth JWKS (public keys for client authentication)
 api.get("/oauth/jwks.json", async (c) => {
-  // Spike: generate a key just to serve the JWKS
-  // Real impl will use a persistent key from secrets
   const { JoseKey } = await import("@atproto/jwk-jose");
-  const key = await JoseKey.generate(["ES256"], "key-1");
+  const key = await JoseKey.fromImportable(c.env.OAUTH_PRIVATE_KEY, "key-1");
   return c.json({ keys: [key.publicJwk] });
 });
 
-// OAuth callback placeholder
-api.get("/oauth/callback", (c) => {
-  return c.text("OAuth callback - not yet implemented");
-});
+// OAuth callback — exchanges code for tokens, creates user, triggers sync
+api.get("/oauth/callback", async (c) => {
+  try {
+    const client = await createOAuthClient(c.env);
+    const params = new URL(c.req.url).searchParams;
+    const { session } = await client.callback(params);
+    const did = session.did;
 
-// OAuth spike test (temporary)
-api.get("/admin/oauth-spike", async (c) => {
-  const { spikeTest } = await import("../oauth/spike.js");
-  const result = await spikeTest(c.env);
-  return c.json(result);
+    // Resolve handle from the authenticated session
+    const agent = new Agent(session);
+    const profile = await agent.getProfile({ actor: did });
+    const handle = profile.data.handle;
+
+    // Clear stale handle mapping (if another DID previously owned this handle)
+    // then upsert the user. DID is the stable identity; handles can move.
+    await c.env.DB.batch([
+      c.env.DB.prepare(`UPDATE users SET handle = '' WHERE handle = ? AND did != ?`).bind(handle, did),
+      c.env.DB.prepare(
+        `INSERT INTO users (did, handle) VALUES (?, ?)
+         ON CONFLICT(did) DO UPDATE SET handle = excluded.handle`,
+      ).bind(did, handle),
+    ]);
+
+    // Kick off user-mode Workflow for initial likes sync
+    await c.env.SYNC_PIPELINE.create({
+      id: `enroll-${did.replace(/:/g, "-")}-${Date.now()}`,
+      params: { mode: "user" as const, did },
+    });
+
+    return c.redirect(`/recs/${did}`);
+  } catch (err) {
+    console.error("OAuth callback failed:", err);
+    return c.redirect("/?error=auth_failed");
+  }
 });
 
 // Add a publisher manually (optional seed)
