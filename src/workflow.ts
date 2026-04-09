@@ -113,7 +113,18 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       return result.meta.changes ?? 0;
     });
 
-    // Step 3: Discover publishers + sync documents
+    // Step 3a: Prune publishers without a valid site.standard.publication
+    // (filters out brid.gy bridged accounts that have docs but no publication)
+    const pruneResult = await step.do("prune-invalid-publishers", async () => {
+      const { pruneInvalidPublishers } = await import("./sync/discover.js");
+      return await pruneInvalidPublishers(this.env.DB, this.env.VECTORS);
+    });
+
+    console.log(
+      `Publishers: pruned ${pruneResult.removed} invalid, skipped ${pruneResult.skipped} (lookup failed) of ${pruneResult.checked} checked`,
+    );
+
+    // Step 3b: Discover publishers + sync documents
     const docResult = await step.do("sync-documents", async () => {
       const result = await syncAllDocuments(this.env.DB);
       return {
@@ -144,6 +155,6 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       console.log("Skipping embed + recommend — VOYAGE_API_KEY not set");
     }
 
-    return { likeResults, pruned, docResult };
+    return { likeResults, pruned, pruneResult, docResult };
   }
 }
