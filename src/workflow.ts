@@ -121,7 +121,7 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
     });
 
     console.log(
-      `Publishers: pruned ${pruneResult.removed} invalid of ${pruneResult.checked} checked`,
+      `Publishers: pruned ${pruneResult.removed} invalid, skipped ${pruneResult.skipped} (lookup failed) of ${pruneResult.checked} checked`,
     );
 
     // Step 3b: Discover publishers + sync documents

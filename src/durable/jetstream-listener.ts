@@ -147,12 +147,15 @@ export class JetstreamListener extends DurableObject<Env> {
 
   private async registerPublisher(did: string): Promise<void> {
     try {
-      await this.env.DB.prepare(
+      const result = await this.env.DB.prepare(
         `INSERT OR IGNORE INTO publishers (did, label) VALUES (?, ?)`,
       )
         .bind(did, "auto:jetstream-do")
         .run();
-      this.publishersFound++;
+      // Only count actual new rows — INSERT OR IGNORE on duplicates returns 0 changes
+      if ((result.meta.changes ?? 0) > 0) {
+        this.publishersFound++;
+      }
     } catch {
       // D1 write failed — non-fatal
     }

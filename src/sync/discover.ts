@@ -23,8 +23,15 @@ const PUBLICATION_COLLECTION = "site.standard.publication";
  * Check whether a DID has at least one site.standard.publication record.
  * Used to filter out brid.gy bridged accounts that have documents but no
  * actual Standard.site publication.
+ *
+ * Returns:
+ *   true  — definitively has a publication
+ *   false — definitively has none
+ *   null  — lookup failed (transient error, treat as "unknown — skip for now")
  */
-export async function hasValidPublication(did: string): Promise<boolean> {
+export async function hasValidPublication(
+  did: string,
+): Promise<boolean | null> {
   try {
     const res = await agent.com.atproto.repo.listRecords({
       repo: did,
@@ -32,8 +39,9 @@ export async function hasValidPublication(did: string): Promise<boolean> {
       limit: 1,
     });
     return res.data.records.length > 0;
-  } catch {
-    return false;
+  } catch (err) {
+    console.error(`hasValidPublication lookup failed for ${did}:`, err);
+    return null;
   }
 }
 
@@ -100,7 +108,9 @@ export async function discoverFromSocialGraph(
   for (const candidate of candidates) {
     if (!candidate.did?.startsWith("did:")) continue;
 
-    if (await hasValidPublication(candidate.did)) {
+    // Only register on a definitive true. false or null (lookup failed) → skip,
+    // we'll retry on the next cron cycle.
+    if ((await hasValidPublication(candidate.did)) === true) {
       await db
         .prepare(
           `INSERT OR IGNORE INTO publishers (did, label) VALUES (?, ?)`,
@@ -128,15 +138,25 @@ function sleep(ms: number): Promise<void> {
 export async function pruneInvalidPublishers(
   db: D1Database,
   vectors: VectorizeIndex,
-): Promise<{ checked: number; removed: number }> {
+): Promise<{ checked: number; removed: number; skipped: number }> {
   const { results: publishers } = await db
     .prepare(`SELECT did FROM publishers`)
     .all<{ did: string }>();
 
   let removed = 0;
+  let skipped = 0;
 
   for (const pub of publishers) {
-    if (await hasValidPublication(pub.did)) {
+    const valid = await hasValidPublication(pub.did);
+    // Only delete on a definitive false. null (lookup failed) → skip and
+    // retry on the next cron — never delete data on a transient error.
+    if (valid === true) {
+      await sleep(100);
+      continue;
+    }
+    if (valid === null) {
+      skipped++;
+      console.log(`    skipping ${pub.did}: publication lookup failed, will retry`);
       await sleep(100);
       continue;
     }
@@ -171,5 +191,5 @@ export async function pruneInvalidPublishers(
     await sleep(100);
   }
 
-  return { checked: publishers.length, removed };
+  return { checked: publishers.length, removed, skipped };
 }
