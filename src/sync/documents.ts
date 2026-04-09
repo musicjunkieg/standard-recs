@@ -77,19 +77,7 @@ export async function syncDocumentsFromRepo(
       fetched++;
       try {
         const doc = record.value as StandardDocument;
-        const textContent = doc.textContent?.trim() || doc.description?.trim() || doc.title || null;
-
-        stmts.push(
-          db.prepare(
-            `INSERT OR REPLACE INTO documents
-              (uri, did, site, title, path, description, text_content, tags, published_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          ).bind(
-            record.uri, did, doc.site ?? null, doc.title,
-            doc.path ?? null, doc.description ?? null, textContent,
-            doc.tags ? JSON.stringify(doc.tags) : null, doc.publishedAt ?? null,
-          ),
-        );
+        stmts.push(upsertDocumentStmt(db, record.uri, did, doc));
         stored++;
       } catch (err) {
         errors++;
@@ -112,7 +100,7 @@ export async function syncDocumentsFromRepo(
   return { fetched, stored, errors };
 }
 
-type StandardDocument = {
+export type StandardDocument = {
   $type: "site.standard.document";
   site: string;
   title: string;
@@ -126,6 +114,37 @@ type StandardDocument = {
   coverImage?: unknown;
   bskyPostRef?: unknown;
 };
+
+/**
+ * Upsert a single Standard.site document into D1.
+ * Used by both the cron pipeline and the Jetstream listener.
+ */
+export function upsertDocumentStmt(
+  db: D1Database,
+  uri: string,
+  did: string,
+  doc: StandardDocument,
+): D1PreparedStatement {
+  const textContent =
+    doc.textContent?.trim() || doc.description?.trim() || doc.title || null;
+  return db
+    .prepare(
+      `INSERT OR REPLACE INTO documents
+        (uri, did, site, title, path, description, text_content, tags, published_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      uri,
+      did,
+      doc.site ?? null,
+      doc.title,
+      doc.path ?? null,
+      doc.description ?? null,
+      textContent,
+      doc.tags ? JSON.stringify(doc.tags) : null,
+      doc.publishedAt ?? null,
+    );
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

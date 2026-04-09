@@ -17,7 +17,25 @@
 import { AtpAgent } from "@atproto/api";
 
 const agent = new AtpAgent({ service: "https://public.api.bsky.app" });
-const COLLECTION = "site.standard.document";
+const PUBLICATION_COLLECTION = "site.standard.publication";
+
+/**
+ * Check whether a DID has at least one site.standard.publication record.
+ * Used to filter out brid.gy bridged accounts that have documents but no
+ * actual Standard.site publication.
+ */
+export async function hasValidPublication(did: string): Promise<boolean> {
+  try {
+    const res = await agent.com.atproto.repo.listRecords({
+      repo: did,
+      collection: PUBLICATION_COLLECTION,
+      limit: 1,
+    });
+    return res.data.records.length > 0;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Known Standard.site publisher DIDs to seed the database.
@@ -82,27 +100,17 @@ export async function discoverFromSocialGraph(
   for (const candidate of candidates) {
     if (!candidate.did?.startsWith("did:")) continue;
 
-    try {
-      const res = await agent.com.atproto.repo.listRecords({
-        repo: candidate.did,
-        collection: COLLECTION,
-        limit: 1,
-      });
-
-      if (res.data.records.length > 0) {
-        await db
-          .prepare(
-            `INSERT OR IGNORE INTO publishers (did, label) VALUES (?, ?)`,
-          )
-          .bind(candidate.did, "auto:social-graph")
-          .run();
-        discovered++;
-      }
-
-      await sleep(100);
-    } catch {
-      // Skip unreachable repos
+    if (await hasValidPublication(candidate.did)) {
+      await db
+        .prepare(
+          `INSERT OR IGNORE INTO publishers (did, label) VALUES (?, ?)`,
+        )
+        .bind(candidate.did, "auto:social-graph")
+        .run();
+      discovered++;
     }
+
+    await sleep(100);
   }
 
   return discovered;
@@ -110,4 +118,58 @@ export async function discoverFromSocialGraph(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Walk all publishers and remove any that no longer have a valid
+ * site.standard.publication record. Cascades deletion to documents,
+ * recommendations referencing those documents, and vectors.
+ */
+export async function pruneInvalidPublishers(
+  db: D1Database,
+  vectors: VectorizeIndex,
+): Promise<{ checked: number; removed: number }> {
+  const { results: publishers } = await db
+    .prepare(`SELECT did FROM publishers`)
+    .all<{ did: string }>();
+
+  let removed = 0;
+
+  for (const pub of publishers) {
+    if (await hasValidPublication(pub.did)) {
+      await sleep(100);
+      continue;
+    }
+
+    // Collect document URIs so we can delete their vectors
+    const { results: docs } = await db
+      .prepare(`SELECT uri FROM documents WHERE did = ?`)
+      .bind(pub.did)
+      .all<{ uri: string }>();
+
+    if (docs.length > 0) {
+      try {
+        await vectors.deleteByIds(docs.map((d) => d.uri));
+      } catch (err) {
+        console.error(`    Vectorize delete failed for ${pub.did}:`, err);
+      }
+    }
+
+    await db.batch([
+      db
+        .prepare(
+          `DELETE FROM recommendations WHERE document_uri IN
+             (SELECT uri FROM documents WHERE did = ?)`,
+        )
+        .bind(pub.did),
+      db.prepare(`DELETE FROM documents WHERE did = ?`).bind(pub.did),
+      db.prepare(`DELETE FROM publishers WHERE did = ?`).bind(pub.did),
+    ]);
+
+    removed++;
+    console.log(`    pruned invalid publisher: ${pub.did} (${docs.length} docs)`);
+    await sleep(100);
+  }
+
+  return { checked: publishers.length, removed };
 }
