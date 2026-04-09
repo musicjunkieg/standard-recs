@@ -9,7 +9,12 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Env } from "../env.js";
 import { createOAuthClient, buildClientMetadata } from "../oauth/client.js";
-import { Agent } from "@atproto/api";
+import { AtpAgent } from "@atproto/api";
+
+// Unauthenticated agent for public profile lookups (DID → handle).
+// We can't use the OAuth session for this — its scope is narrow and
+// doesn't include rpc:app.bsky.actor.getProfile.
+const publicAgent = new AtpAgent({ service: "https://public.api.bsky.app" });
 import { listUsers } from "../sync/users.js";
 import { enrollPage } from "./enroll-page.js";
 import { recsPage } from "./recs-page.js";
@@ -274,9 +279,9 @@ api.get("/oauth/callback", async (c) => {
     const { session } = await client.callback(params);
     const did = session.did;
 
-    // Resolve handle from the authenticated session
-    const agent = new Agent(session);
-    const profile = await agent.getProfile({ actor: did });
+    // Resolve handle via the public appview, NOT the authenticated session.
+    // The OAuth scope only grants getActorLikes, not getProfile.
+    const profile = await publicAgent.getProfile({ actor: did });
     const handle = profile.data.handle;
 
     // Clear stale handle mapping (if another DID previously owned this handle)
