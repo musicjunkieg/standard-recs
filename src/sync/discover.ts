@@ -23,8 +23,16 @@ import { friendlyFetch } from "./fetch-helper.js";
 const PUBLICATION_COLLECTION = "site.standard.publication";
 
 /**
- * Call com.atproto.repo.listRecords against a specific PDS.
- * Returns the parsed body, or null on failure.
+ * Query a specific PDS for records in a given collection using com.atproto.repo.listRecords.
+ *
+ * @param pds - Base URL of the PDS (e.g., `https://pds.example.com`)
+ * @param did - Repository DID to query (the `repo` parameter)
+ * @param collection - Collection name to list (the `collection` parameter)
+ * @param limit - Maximum number of records to return (default: 100)
+ * @param cursor - Optional pagination cursor
+ * @returns The parsed response `{ records: [{ uri, cid, value }...], cursor? }`, or `null` when the HTTP response is not OK
+ *
+ * Note: network or JSON parsing errors are not caught here and will propagate to the caller.
  */
 async function listRecordsFromPds<T = unknown>(
   pds: string,
@@ -50,14 +58,9 @@ async function listRecordsFromPds<T = unknown>(
 export { listRecordsFromPds };
 
 /**
- * Check whether a DID has at least one site.standard.publication record.
- * Resolves the PDS and calls listRecords directly — cannot use the appview
- * because it doesn't implement listRecords.
+ * Determine whether a DID has at least one site.standard.publication record.
  *
- * Returns:
- *   true  — definitively has a publication
- *   false — definitively has none (but PDS was reachable)
- *   null  — lookup failed (transient error, treat as "unknown — skip for now")
+ * @returns `true` if at least one publication record exists for the DID, `false` if the PDS was reachable and no records were found, `null` if the lookup failed or the DID's PDS could not be resolved.
  */
 export async function hasValidPublication(
   did: string,
@@ -116,12 +119,9 @@ export async function seedPublishers(db: D1Database): Promise<number> {
 }
 
 /**
- * Discover publishers via lightrail.microcosm.blue.
- * Returns every DID with at least one site.standard.publication record.
+ * Discover publisher DIDs indexed by lightrail that have at least one site.standard.publication record.
  *
- * Lightrail only indexes the firehose, so the returned set already excludes
- * brid.gy bridged accounts that emit site.standard.document records without
- * ever registering a site.standard.publication.
+ * @returns The number of publisher DIDs that were newly inserted into the `publishers` table during this run
  */
 export async function discoverViaLightrail(db: D1Database): Promise<number> {
   let discovered = 0;
@@ -144,11 +144,11 @@ export async function discoverViaLightrail(db: D1Database): Promise<number> {
 }
 
 /**
- * Discover publishers from users' social graphs.
- * Checks if authors of liked posts also have a site.standard.publication.
+ * Discover publisher DIDs by inspecting authors of liked posts and verifying they publish a site.standard.publication.
  *
- * Kept as a secondary path alongside lightrail — useful if lightrail is down
- * or lags, and costs little (capped at 50 candidates).
+ * Queries up to 50 candidate DIDs derived from the `likes` table, verifies each candidate with `hasValidPublication`, and inserts verified DIDs into `publishers` with the label `auto:social-graph`.
+ *
+ * @returns The number of DIDs inserted into `publishers` during this run
  */
 export async function discoverFromSocialGraph(
   db: D1Database,

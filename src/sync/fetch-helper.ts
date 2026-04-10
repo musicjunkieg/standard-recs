@@ -9,6 +9,13 @@
 const USER_AGENT =
   "standard-recs (+https://standard-recs.bryan-78d.workers.dev; @chaosgreml.in)";
 
+/**
+ * Perform a fetch request while ensuring a recognizable `User-Agent` header is present when one is not provided.
+ *
+ * @param input - The request target as a URL string or `URL` object.
+ * @param init - Optional `RequestInit` to merge with the request; provided headers are preserved and only supplemented with `User-Agent` if missing.
+ * @returns The `Response` returned by `fetch`.
+ */
 export function friendlyFetch(
   input: string | URL,
   init?: RequestInit,
