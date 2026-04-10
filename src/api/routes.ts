@@ -411,7 +411,184 @@ api.get("/admin/test-embed", async (c) => {
   }
 });
 
+// Debug embed with real data — fetches 5 real likes + 5 real docs from D1,
+// sends them through Voyage, upserts to Vectorize, returns full result or error.
+// POST because it writes to Vectorize (side effects).
+api.post("/admin/debug-embed", async (c) => {
+  const token = c.req.header("Authorization")?.replace("Bearer ", "");
+  if (!token || token !== c.env.VOYAGE_API_KEY) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const results: Array<{ step: string; ok: boolean; detail: unknown }> = [];
+  const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  // Test with real likes
+  {
+    let currentStep = "likes-query";
+    try {
+      const { results: likes } = await c.env.DB
+        .prepare(
+          `SELECT uri, liked_post_text FROM likes
+           WHERE liked_post_text IS NOT NULL AND liked_post_text != ''
+           LIMIT 5`,
+        )
+        .all<{ uri: string; liked_post_text: string }>();
+
+      if (likes.length === 0) {
+        results.push({ step: "likes-query", ok: true, detail: "no likes with text" });
+      } else {
+        currentStep = "likes-voyage";
+        const texts = likes.map((l) => l.liked_post_text);
+        const res = await fetchVoyage(c.env.VOYAGE_API_KEY, texts, "query");
+
+        if (!res.ok) {
+          const body = await res.text();
+          results.push({ step: "likes-voyage", ok: false, detail: { status: res.status, body } });
+        } else {
+          currentStep = "likes-voyage-parse";
+          const data = await res.json() as Record<string, unknown>;
+          const validation = validateVoyageResponse(data, likes.length);
+          if (!validation.ok) {
+            results.push({ step: "likes-voyage-parse", ok: false, detail: validation.error });
+          } else {
+            currentStep = "likes-upsert";
+            const embeddings = validation.embeddings;
+            const probeIds = likes.map((l) => `debug-${nonce}-${l.uri}`);
+            const vectors: VectorizeVector[] = embeddings.map((emb, i) => ({
+              id: probeIds[i],
+              values: emb,
+              namespace: "debug-likes",
+              metadata: { type: "like" },
+            }));
+            await c.env.VECTORS.upsert(vectors);
+
+            currentStep = "likes-cleanup";
+            await c.env.VECTORS.deleteByIds(probeIds);
+            results.push({ step: "likes-embed", ok: true, detail: { count: likes.length, dimensions: embeddings[0].length } });
+          }
+        }
+      }
+    } catch (err) {
+      results.push({ step: currentStep, ok: false, detail: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  // Test with real documents
+  {
+    let currentStep = "docs-query";
+    try {
+      const { results: docs } = await c.env.DB
+        .prepare(
+          `SELECT uri, title, description, text_content FROM documents
+           WHERE (text_content IS NOT NULL AND text_content != '')
+              OR (description IS NOT NULL AND description != '')
+           LIMIT 5`,
+        )
+        .all<{ uri: string; title: string; description: string | null; text_content: string | null }>();
+
+      if (docs.length === 0) {
+        results.push({ step: "docs-query", ok: true, detail: "no docs with content" });
+      } else {
+        currentStep = "docs-voyage";
+        const texts = docs.map((d) => {
+          const body = d.text_content || d.description || "";
+          return `${d.title}\n\n${body}`.slice(0, 16000);
+        });
+        const res = await fetchVoyage(c.env.VOYAGE_API_KEY, texts, "document");
+
+        if (!res.ok) {
+          const body = await res.text();
+          results.push({ step: "docs-voyage", ok: false, detail: { status: res.status, body } });
+        } else {
+          currentStep = "docs-voyage-parse";
+          const data = await res.json() as Record<string, unknown>;
+          const validation = validateVoyageResponse(data, docs.length);
+          if (!validation.ok) {
+            results.push({ step: "docs-voyage-parse", ok: false, detail: validation.error });
+          } else {
+            currentStep = "docs-upsert";
+            const embeddings = validation.embeddings;
+            const probeIds = docs.map((d) => `debug-${nonce}-${d.uri}`);
+            const vectors: VectorizeVector[] = embeddings.map((emb, i) => ({
+              id: probeIds[i],
+              values: emb,
+              namespace: "debug-documents",
+              metadata: { type: "document", title: docs[i].title },
+            }));
+            await c.env.VECTORS.upsert(vectors);
+
+            currentStep = "docs-cleanup";
+            await c.env.VECTORS.deleteByIds(probeIds);
+            results.push({ step: "docs-embed", ok: true, detail: { count: docs.length, dimensions: embeddings[0].length } });
+          }
+        }
+      }
+    } catch (err) {
+      results.push({ step: currentStep, ok: false, detail: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  const allOk = results.every((r) => r.ok);
+  return c.json({ ok: allOk, results }, allOk ? 200 : 502);
+});
+
 // ─── Helpers ───
+
+/** Fetch Voyage embeddings with a 15s timeout. */
+async function fetchVoyage(
+  apiKey: string,
+  texts: string[],
+  inputType: "query" | "document",
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  try {
+    return await fetch(VOYAGE_API, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: VOYAGE_MODEL,
+        input: texts,
+        input_type: inputType,
+        output_dimension: EMBEDDING_DIMENSIONS,
+      }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/** Validate Voyage response shape and return extracted embeddings. */
+function validateVoyageResponse(
+  data: Record<string, unknown>,
+  expectedCount: number,
+): { ok: true; embeddings: number[][] } | { ok: false; error: string } {
+  if (!data || typeof data !== "object" || !Array.isArray(data.data)) {
+    const desc = !data ? "null/undefined" : `keys: ${Object.keys(data)}`;
+    return { ok: false, error: `Missing data array. Response was ${desc}` };
+  }
+  const items = data.data as Array<Record<string, unknown>>;
+  if (items.length !== expectedCount) {
+    return { ok: false, error: `Expected ${expectedCount} embeddings, got ${items.length}` };
+  }
+  // Sort by index to match input order — Voyage can return items out of order.
+  // Same pattern as embed.ts getEmbeddings().
+  items.sort((a, b) => (a.index as number) - (b.index as number));
+  for (let i = 0; i < items.length; i++) {
+    if (!Array.isArray(items[i]?.embedding)) {
+      return { ok: false, error: `Item ${i} missing embedding array` };
+    }
+  }
+  return {
+    ok: true,
+    embeddings: items.map((item) => item.embedding as number[]),
+  };
+}
 
 function buildDocumentUrl(
   site: string | null,
