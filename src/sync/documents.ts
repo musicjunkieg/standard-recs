@@ -34,12 +34,30 @@ export type DocSyncResult = {
 export async function syncAllDocuments(db: D1Database): Promise<DocSyncResult> {
   await seedPublishers(db);
 
+  // Defensive wrappers so a discovery failure never aborts the whole
+  // syncAllDocuments run. discoverViaLightrail already catches internally,
+  // but discoverFromSocialGraph does not — keep the pattern uniform and
+  // surface any failure in totalErrors so the caller can see it.
+  let discoveryErrors = 0;
+
   console.log("  Discovering publishers via lightrail...");
-  const fromLightrail = await discoverViaLightrail(db);
+  let fromLightrail = 0;
+  try {
+    fromLightrail = await discoverViaLightrail(db);
+  } catch (err) {
+    discoveryErrors++;
+    console.error("  discoverViaLightrail threw:", err);
+  }
   console.log(`    ${fromLightrail} new publishers from lightrail`);
 
   console.log("  Discovering publishers from social graph...");
-  const fromSocialGraph = await discoverFromSocialGraph(db);
+  let fromSocialGraph = 0;
+  try {
+    fromSocialGraph = await discoverFromSocialGraph(db);
+  } catch (err) {
+    discoveryErrors++;
+    console.error("  discoverFromSocialGraph threw:", err);
+  }
   console.log(`    ${fromSocialGraph} new publishers from social graph`);
 
   const discovered = fromLightrail + fromSocialGraph;
@@ -52,7 +70,7 @@ export async function syncAllDocuments(db: D1Database): Promise<DocSyncResult> {
 
   let totalFetched = 0;
   let totalStored = 0;
-  let totalErrors = 0;
+  let totalErrors = discoveryErrors;
 
   for (const pub of publishers) {
     try {
