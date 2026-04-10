@@ -93,22 +93,25 @@ export async function generateUserRecommendations(
   }
   const tasteVector = computeTasteVector(likeVectors, likeHashToTimestamp);
 
-  // 4. Query Vectorize for nearest documents
+  // 4. Query Vectorize for nearest documents.
+  // returnMetadata must be "all" (not "indexed") because the uri field
+  // is stored in metadata but not registered as a metadata index.
+  // "all" limits topK to 50; our topN*2 (default 20) is well under.
   const matches = await vectors.query(tasteVector, {
-    topK: topN * 2, // Fetch extra for filtering
+    topK: topN * 2, // Fetch extra so filtering still yields topN
     namespace: "documents",
     returnValues: false,
-    returnMetadata: "indexed",
+    returnMetadata: "all",
   });
 
   // 5. Store top-N in D1 — match.id is a hash, so read the original URI
-  // from metadata where it was stored during embedding.
+  // from metadata. Filter THEN slice so we always get up to topN valid recs.
   const recs: Recommendation[] = matches.matches
-    .slice(0, topN)
     .filter((match) => {
       const uri = (match.metadata as { uri?: string } | null)?.uri;
       return !!uri;
     })
+    .slice(0, topN)
     .map((match) => ({
       did,
       document_uri: (match.metadata as { uri: string }).uri,
