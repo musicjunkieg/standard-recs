@@ -54,7 +54,15 @@ export async function syncDocumentsBatch(
   // If sync crashes mid-publisher, the row won't retry until the next 23h
   // window. That tradeoff is acceptable — we'd rather waste one publisher
   // per crash than do duplicate work across every concurrent workflow run.
-  for (let i = 0; i < limit; i++) {
+  //
+  // Loop driven by processed count (not attempt count) so CAS race losses
+  // don't shrink the effective batch. Safety cap at limit*3 total attempts
+  // prevents infinite loops if every candidate is lost to concurrent races.
+  const maxAttempts = limit * 3;
+  let attempts = 0;
+  while (processed < limit && attempts < maxAttempts) {
+    attempts++;
+
     // D1 doesn't document UPDATE RETURNING, and .first()/.all() on
     // UPDATE RETURNING have been unreliable in practice. Use a documented
     // SELECT + conditional UPDATE pattern instead. The UPDATE's WHERE
