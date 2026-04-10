@@ -16,6 +16,7 @@ import { AtpAgent } from "@atproto/api";
 // doesn't include rpc:app.bsky.actor.getProfile.
 const publicAgent = new AtpAgent({ service: "https://public.api.bsky.app" });
 import { listUsers } from "../sync/users.js";
+import { VOYAGE_API, VOYAGE_MODEL, EMBEDDING_DIMENSIONS } from "../recommend/embed.js";
 import { enrollPage } from "./enroll-page.js";
 import { recsPage } from "./recs-page.js";
 import { recsLookupPage } from "./recs-lookup-page.js";
@@ -322,6 +323,92 @@ api.post("/admin/add-publisher", async (c) => {
     .run();
 
   return c.json({ added: true, did: body.did });
+});
+
+// Test Voyage API + Vectorize with a single embedding.
+// Gated by VOYAGE_API_KEY in the Authorization header to prevent
+// unauthenticated callers from triggering billable API calls.
+api.get("/admin/test-embed", async (c) => {
+  const token = c.req.header("Authorization")?.replace("Bearer ", "");
+  if (!token || token !== c.env.VOYAGE_API_KEY) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  let currentStep = "voyage-fetch";
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+
+    let res: Response;
+    try {
+      res = await fetch(VOYAGE_API, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${c.env.VOYAGE_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: VOYAGE_MODEL,
+          input: ["Hello world test embedding"],
+          input_type: "query",
+          output_dimension: EMBEDDING_DIMENSIONS,
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!res.ok) {
+      const body = await res.text();
+      return c.json({ step: "voyage-fetch", ok: false, status: res.status, body }, 502);
+    }
+
+    currentStep = "voyage-parse";
+    const data = await res.json() as Record<string, unknown>;
+    if (
+      !data ||
+      !Array.isArray(data.data) ||
+      data.data.length === 0 ||
+      !Array.isArray((data.data as Record<string, unknown>[])[0]?.embedding)
+    ) {
+      return c.json({
+        step: "voyage-parse",
+        ok: false,
+        error: "Unexpected Voyage response shape",
+        receivedKeys: data ? Object.keys(data) : null,
+      }, 422);
+    }
+    const vector = (data.data as Array<{ embedding: number[] }>)[0].embedding;
+
+    currentStep = "vector-upsert";
+    const probeId = `test-embed-probe-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await c.env.VECTORS.upsert([{
+      id: probeId,
+      values: vector,
+      namespace: "likes",
+      metadata: { type: "test" },
+    }]);
+
+    currentStep = "vector-cleanup";
+    await c.env.VECTORS.deleteByIds([probeId]);
+
+    return c.json({
+      step: "all",
+      ok: true,
+      voyageStatus: res.status,
+      vectorDimensions: vector.length,
+    });
+  } catch (err) {
+    const isTimeout = err instanceof DOMException && err.name === "AbortError";
+    return c.json({
+      step: currentStep,
+      ok: false,
+      error: isTimeout
+        ? "Voyage API request timed out after 10s"
+        : err instanceof Error ? err.message : String(err),
+    }, isTimeout ? 504 : 500);
+  }
 });
 
 // ─── Helpers ───
