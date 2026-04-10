@@ -324,6 +324,57 @@ api.post("/admin/add-publisher", async (c) => {
   return c.json({ added: true, did: body.did });
 });
 
+// Test Voyage API + Vectorize with a single embedding
+api.get("/admin/test-embed", async (c) => {
+  try {
+    const res = await fetch("https://api.voyageai.com/v1/embeddings", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${c.env.VOYAGE_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "voyage-3.5-lite",
+        input: ["Hello world test embedding"],
+        input_type: "query",
+        output_dimension: 1024,
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      return c.json({ step: "voyage", ok: false, status: res.status, body }, 502);
+    }
+
+    const data = await res.json() as { data: Array<{ embedding: number[] }> };
+    const vector = data.data[0].embedding;
+
+    // Try upserting to Vectorize
+    await c.env.VECTORS.upsert([{
+      id: "test-embed-probe",
+      values: vector,
+      namespace: "likes",
+      metadata: { type: "test" },
+    }]);
+
+    // Clean up
+    await c.env.VECTORS.deleteByIds(["test-embed-probe"]);
+
+    return c.json({
+      step: "all",
+      ok: true,
+      voyageStatus: res.status,
+      vectorDimensions: vector.length,
+    });
+  } catch (err) {
+    return c.json({
+      step: "unknown",
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    }, 500);
+  }
+});
+
 // ─── Helpers ───
 
 function buildDocumentUrl(

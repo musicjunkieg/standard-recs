@@ -64,7 +64,7 @@ export async function embedAll(
         likeCount += batch.length;
       } catch (err) {
         errors += batch.length;
-        console.error("Like embedding batch failed:", err);
+        console.error("Like embedding batch failed:", truncErr(err));
       }
     }
   }
@@ -107,7 +107,7 @@ export async function embedAll(
         docCount += batch.length;
       } catch (err) {
         errors += batch.length;
-        console.error("Document embedding batch failed:", err);
+        console.error("Document embedding batch failed:", truncErr(err));
       }
     }
   }
@@ -152,6 +152,12 @@ async function getEmbeddings(
   return data.data
     .sort((a, b) => a.index - b.index)
     .map((d) => d.embedding);
+}
+
+/** Truncate an error to ~500 chars so it doesn't blow the 256KB log budget. */
+function truncErr(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.length > 500 ? msg.slice(0, 500) + "…(truncated)" : msg;
 }
 
 function chunk<T>(arr: T[], size: number): T[][] {
