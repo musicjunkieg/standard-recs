@@ -615,15 +615,20 @@ function buildDocumentUrl(
   site: string | null,
   path: string | null,
 ): string | null {
+  // Normalize path to ensure a single leading slash
+  const normalizedPath = path
+    ? (path.startsWith("/") ? path : `/${path}`)
+    : null;
+
   // Prefer the publication's resolved web URL
   if (publicationUrl) {
     const base = publicationUrl.replace(/\/$/, "");
-    return path ? `${base}${path}` : base;
+    return normalizedPath ? `${base}${normalizedPath}` : base;
   }
   // Fall back to site if it's already an https URL
   if (site && !site.startsWith("at://")) {
     const base = site.replace(/\/$/, "");
-    return path ? `${base}${path}` : base;
+    return normalizedPath ? `${base}${normalizedPath}` : base;
   }
   return null;
 }

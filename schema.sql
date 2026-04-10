@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS publications (
   name TEXT
 );
 
+CREATE INDEX IF NOT EXISTS idx_publications_did ON publications(did);
+
 CREATE TABLE IF NOT EXISTS oauth_state (
   key TEXT PRIMARY KEY,
   state TEXT NOT NULL,
