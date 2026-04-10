@@ -8,6 +8,8 @@
  *   4. Store top-N in D1
  */
 
+import { vectorIds } from "./vector-id.js";
+
 type Recommendation = {
   did: string;
   document_uri: string;
@@ -70,9 +72,9 @@ export async function generateUserRecommendations(
     return [];
   }
 
-  // 2. Fetch their like vectors from Vectorize
-  const likeIds = likes.map((l) => l.uri);
-  const likeVectors = await vectors.getByIds(likeIds);
+  // 2. Fetch their like vectors from Vectorize (IDs are hashed)
+  const likeHashes = await vectorIds(likes.map((l) => l.uri));
+  const likeVectors = await vectors.getByIds(likeHashes);
 
   if (likeVectors.length === 0) {
     console.log(`  ${did}: no embedded likes yet`);
@@ -80,7 +82,16 @@ export async function generateUserRecommendations(
   }
 
   // 3. Compute recency-weighted average (exponential decay)
-  const tasteVector = computeTasteVector(likeVectors, likes);
+  // Build hash→timestamp map for the taste vector computation
+  const now = Date.now();
+  const likeHashToTimestamp = new Map<string, number>();
+  for (let i = 0; i < likes.length; i++) {
+    likeHashToTimestamp.set(
+      likeHashes[i],
+      likes[i].liked_at ? new Date(likes[i].liked_at!).getTime() : now,
+    );
+  }
+  const tasteVector = computeTasteVector(likeVectors, likeHashToTimestamp);
 
   // 4. Query Vectorize for nearest documents
   const matches = await vectors.query(tasteVector, {
@@ -90,12 +101,17 @@ export async function generateUserRecommendations(
     returnMetadata: "indexed",
   });
 
-  // 5. Store top-N in D1
+  // 5. Store top-N in D1 — match.id is a hash, so read the original URI
+  // from metadata where it was stored during embedding.
   const recs: Recommendation[] = matches.matches
     .slice(0, topN)
+    .filter((match) => {
+      const uri = (match.metadata as { uri?: string } | null)?.uri;
+      return !!uri;
+    })
     .map((match) => ({
       did,
-      document_uri: match.id,
+      document_uri: (match.metadata as { uri: string }).uri,
       score: match.score,
     }));
 
@@ -126,16 +142,14 @@ export async function generateUserRecommendations(
  */
 function computeTasteVector(
   likeVectors: VectorizeVector[],
-  likes: Array<{ uri: string; liked_at: string | null }>,
+  likeHashToTimestamp: Map<string, number>,
 ): number[] {
   const now = Date.now();
   const halfLifeMs = 7 * 24 * 60 * 60 * 1000; // 7 days
   const ln2 = Math.LN2;
 
-  // Map URI → liked_at for weight calculation
-  const likedAtMap = new Map(
-    likes.map((l) => [l.uri, l.liked_at ? new Date(l.liked_at).getTime() : now]),
-  );
+  // likeHashToTimestamp maps hash ID → liked_at timestamp
+  const likedAtMap = likeHashToTimestamp;
 
   // Determine vector dimensionality from first vector
   const dim = likeVectors[0].values!.length;
