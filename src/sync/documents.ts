@@ -158,13 +158,18 @@ async function markBridgedPublisher(
       }
     }
 
-    await db.batch([
-      db.prepare(
-        `DELETE FROM recommendations WHERE document_uri IN
-           (SELECT uri FROM documents WHERE did = ?)`,
-      ).bind(did),
-      db.prepare(`DELETE FROM documents WHERE did = ?`).bind(did),
-    ]);
+    try {
+      await db.batch([
+        db.prepare(
+          `DELETE FROM recommendations WHERE document_uri IN
+             (SELECT uri FROM documents WHERE did = ?)`,
+        ).bind(did),
+        db.prepare(`DELETE FROM documents WHERE did = ?`).bind(did),
+      ]);
+    } catch (err) {
+      console.error(`  markBridgedPublisher: D1 delete failed for ${did}:`, err);
+      return false;
+    }
   }
 
   // Mark as bridged — the claim query's WHERE label != 'bridged' will
