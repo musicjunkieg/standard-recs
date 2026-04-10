@@ -101,16 +101,23 @@ export async function syncDocumentsFromRepo(
   let errors = 0;
 
   while (true) {
-    const body = await listRecordsFromPds<StandardDocument>(
-      pds,
-      did,
-      COLLECTION,
-      100,
-      cursor,
-    );
+    let body: Awaited<ReturnType<typeof listRecordsFromPds<StandardDocument>>>;
+    try {
+      body = await listRecordsFromPds<StandardDocument>(
+        pds,
+        did,
+        COLLECTION,
+        100,
+        cursor,
+      );
+    } catch (err) {
+      // Network/JSON error — record and return partial progress.
+      console.error(`  listRecordsFromPds threw for ${did}:`, err);
+      return { fetched, stored, errors: errors + 1 };
+    }
 
     if (body === null) {
-      // PDS call failed — surface as an error so the caller knows something went wrong
+      // PDS returned a non-2xx — surface as an error, keep partial totals
       return { fetched, stored, errors: errors + 1 };
     }
 

@@ -13,7 +13,12 @@
 
 import { friendlyFetch } from "./fetch-helper.js";
 
-const cache = new Map<string, string | null>();
+// Successful lookups are cached for the lifetime of the worker instance.
+// Negative lookups (null) expire after NEGATIVE_TTL_MS so a transient
+// plc.directory outage or network hiccup can't poison a DID permanently.
+type CacheEntry = { endpoint: string | null; expiresAt: number };
+const NEGATIVE_TTL_MS = 5 * 60 * 1000;
+const cache = new Map<string, CacheEntry>();
 
 type DidDocument = {
   service?: Array<{ id: string; type: string; serviceEndpoint: string }>;
@@ -30,7 +35,10 @@ type DidDocument = {
  * @returns The resolved PDS endpoint URL, or `null` if no PDS endpoint could be found or resolution failed
  */
 export async function resolvePds(did: string): Promise<string | null> {
-  if (cache.has(did)) return cache.get(did)!;
+  const cached = cache.get(did);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.endpoint;
+  }
 
   let endpoint: string | null = null;
   try {
@@ -48,7 +56,12 @@ export async function resolvePds(did: string): Promise<string | null> {
     console.error(`resolvePds failed for ${did}:`, err);
   }
 
-  cache.set(did, endpoint);
+  cache.set(did, {
+    endpoint,
+    // Successful entries never expire; negative entries expire soon so
+    // transient failures don't become permanent.
+    expiresAt: endpoint ? Number.POSITIVE_INFINITY : Date.now() + NEGATIVE_TTL_MS,
+  });
   return endpoint;
 }
 

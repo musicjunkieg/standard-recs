@@ -128,16 +128,23 @@ export async function discoverViaLightrail(db: D1Database): Promise<number> {
 
   try {
     for await (const did of listReposByCollection(PUBLICATION_COLLECTION)) {
-      const result = await db
-        .prepare(
-          `INSERT OR IGNORE INTO publishers (did, label) VALUES (?, ?)`,
-        )
-        .bind(did, "auto:lightrail")
-        .run();
-      if ((result.meta.changes ?? 0) > 0) discovered++;
+      // Per-iteration try/catch: a single failed insert must not abort the
+      // whole lightrail stream. Keep the outer try around the iterator only.
+      try {
+        const result = await db
+          .prepare(
+            `INSERT OR IGNORE INTO publishers (did, label) VALUES (?, ?)`,
+          )
+          .bind(did, "auto:lightrail")
+          .run();
+        if ((result.meta.changes ?? 0) > 0) discovered++;
+      } catch (insertErr) {
+        console.error(`discoverViaLightrail insert failed for ${did}:`, insertErr);
+        continue;
+      }
     }
   } catch (err) {
-    console.error("discoverViaLightrail failed:", err);
+    console.error("discoverViaLightrail stream failed:", err);
   }
 
   return discovered;
