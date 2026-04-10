@@ -20,6 +20,17 @@ export type DocSyncResult = {
   errors: number;
 };
 
+/**
+ * Synchronizes `site.standard.document` records from discovered publishers into the local `documents` table and returns aggregated counters.
+ *
+ * Performs publisher seeding and discovery, fetches records from each publisher's repository, upserts documents into the database, and accumulates totals.
+ *
+ * @returns An object with counters:
+ *  - `discovered`: the number of new publishers discovered,
+ *  - `fetched`: the total number of records fetched from publishers,
+ *  - `stored`: the total number of documents successfully upserted,
+ *  - `errors`: the total number of errors encountered during the run
+ */
 export async function syncAllDocuments(db: D1Database): Promise<DocSyncResult> {
   await seedPublishers(db);
 
@@ -61,6 +72,19 @@ export async function syncAllDocuments(db: D1Database): Promise<DocSyncResult> {
   return { discovered, fetched: totalFetched, stored: totalStored, errors: totalErrors };
 }
 
+/**
+ * Synchronizes `site.standard.document` records from a publisher's PDS into the local `documents` table.
+ *
+ * The function resolves the publisher's PDS, pages through the collection, prepares upsert statements for each
+ * record, executes them in batches, and accumulates counters for processed records and errors. It returns early
+ * if PDS resolution fails or a PDS listing call fails.
+ *
+ * @param did - The publisher's decentralized identifier (DID) whose documents should be synchronized
+ * @returns An object with counters:
+ * - `fetched`: number of records read from the PDS
+ * - `stored`: number of records successfully prepared/applied to the database
+ * - `errors`: number of record- or operation-level failures encountered during the run
+ */
 export async function syncDocumentsFromRepo(
   db: D1Database,
   did: string,

@@ -19,6 +19,16 @@ type DidDocument = {
   service?: Array<{ id: string; type: string; serviceEndpoint: string }>;
 };
 
+/**
+ * Resolve a DID's AT Protocol Personal Data Server (PDS) endpoint and cache the result.
+ *
+ * Attempts to fetch and parse the DID document for `did`, extract the matching PDS service
+ * entry, and return its `serviceEndpoint`. Results are stored in-module for the lifetime
+ * of the worker to speed subsequent lookups.
+ *
+ * @param did - The DID to resolve (for example `did:web:example.com` or `did:plc:...`)
+ * @returns The resolved PDS endpoint URL, or `null` if no PDS endpoint could be found or resolution failed
+ */
 export async function resolvePds(did: string): Promise<string | null> {
   if (cache.has(did)) return cache.get(did)!;
 
@@ -42,6 +52,12 @@ export async function resolvePds(did: string): Promise<string | null> {
   return endpoint;
 }
 
+/**
+ * Fetches the DID document for supported DID methods.
+ *
+ * @param did - The DID to resolve (supported formats include `did:plc:` and `did:web:`)
+ * @returns `DidDocument` if the document was fetched and parsed successfully, `null` otherwise
+ */
 async function fetchDidDocument(did: string): Promise<DidDocument | null> {
   if (did.startsWith("did:plc:")) {
     const res = await friendlyFetch(`https://plc.directory/${did}`);
