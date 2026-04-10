@@ -175,9 +175,11 @@ export class JetstreamListener extends DurableObject<Env> {
       return;
     }
 
-    // Only insert documents from known publishers
+    // Only insert documents from known, non-bridged publishers
     const known = await this.env.DB
-      .prepare(`SELECT 1 FROM publishers WHERE did = ?`)
+      .prepare(
+        `SELECT 1 FROM publishers WHERE did = ? AND COALESCE(label, '') != 'bridged'`,
+      )
       .bind(did)
       .first();
     if (!known) return;

@@ -54,26 +54,50 @@ export async function syncDocumentsBatch(
   // If sync crashes mid-publisher, the row won't retry until the next 23h
   // window. That tradeoff is acceptable — we'd rather waste one publisher
   // per crash than do duplicate work across every concurrent workflow run.
-  for (let i = 0; i < limit; i++) {
-    // D1's .first() may not reliably return rows from UPDATE RETURNING.
-    // Use .all() and take the first result instead.
-    const { results: claimedRows } = await db
-      .prepare(
-        `UPDATE publishers
-            SET last_synced_at = datetime('now')
-          WHERE did = (
-            SELECT did FROM publishers
-             WHERE last_synced_at IS NULL
-                OR last_synced_at < datetime('now', '-23 hours')
-             ORDER BY last_synced_at ASC NULLS FIRST
-             LIMIT 1
-          )
-          RETURNING did, label`,
-      )
-      .all<{ did: string; label: string | null }>();
-    const claimed = claimedRows[0] ?? null;
+  //
+  // Loop driven by processed count (not attempt count) so CAS race losses
+  // don't shrink the effective batch. Safety cap at limit*3 total attempts
+  // prevents infinite loops if every candidate is lost to concurrent races.
+  const maxAttempts = limit * 3;
+  let attempts = 0;
+  while (processed < limit && attempts < maxAttempts) {
+    attempts++;
 
-    if (!claimed) break; // nothing left to sync
+    // D1 doesn't document UPDATE RETURNING, and .first()/.all() on
+    // UPDATE RETURNING have been unreliable in practice. Use a documented
+    // SELECT + conditional UPDATE pattern instead. The UPDATE's WHERE
+    // clause acts as a compare-and-swap: if a concurrent workflow claimed
+    // the row between our SELECT and UPDATE, meta.changes === 0 and we
+    // skip to the next candidate.
+    const candidate = await db
+      .prepare(
+        `SELECT did, label FROM publishers
+          WHERE (last_synced_at IS NULL
+                 OR last_synced_at < datetime('now', '-23 hours'))
+            AND COALESCE(label, '') != 'bridged'
+          ORDER BY last_synced_at ASC NULLS FIRST
+          LIMIT 1`,
+      )
+      .first<{ did: string; label: string | null }>();
+
+    if (!candidate) break; // nothing left to sync
+
+    // Stamp it — the WHERE re-checks eligibility so a concurrent claim
+    // results in changes === 0 (we lost the race; try next).
+    const { meta } = await db
+      .prepare(
+        `UPDATE publishers SET last_synced_at = datetime('now')
+          WHERE did = ?
+            AND (last_synced_at IS NULL
+                 OR last_synced_at < datetime('now', '-23 hours'))
+            AND COALESCE(label, '') != 'bridged'`,
+      )
+      .bind(candidate.did)
+      .run();
+
+    if ((meta.changes ?? 0) === 0) continue; // lost race, try next
+
+    const claimed = candidate;
 
     processed++;
 
@@ -100,67 +124,65 @@ export async function syncDocumentsBatch(
 }
 
 /**
- * Delete a bridged publisher's documents, vectors, recommendations, and
- * the publisher row itself. Called inline during sync whenever a publisher
- * is detected to live on a bridged PDS (e.g., brid.gy).
+ * Mark a bridged publisher so it's permanently skipped by the claim query.
  *
- * Returns true on full success, false if any Vectorize chunk deletion
- * failed. On failure, the D1 rows are NOT deleted — losing them would
- * drop the URI→vector mappings needed to ever clean up the orphaned
- * vectors. The publisher's last_synced_at was stamped by the caller
- * before this ran, so natural 23h retry will kick in on the next cron.
+ * Sets label='bridged' instead of deleting the row. This prevents the
+ * Sisyphean loop where lightrail re-discovers the publisher every cron
+ * (because brid.gy accounts DO have site.standard.publication records)
+ * and we waste entire batches re-cleaning the same DIDs.
+ *
+ * Also deletes any existing documents, vectors, and recommendations
+ * from the publisher since they're bridged content, not genuine
+ * Standard.site publishing.
  */
-async function cleanupBridgedPublisher(
+async function markBridgedPublisher(
   db: D1Database,
   vectors: VectorizeIndex,
   did: string,
 ): Promise<boolean> {
-  // Collect document URIs for vector deletion
+  // Delete any existing documents/vectors from a previous sync
   const { results: docs } = await db
     .prepare(`SELECT uri FROM documents WHERE did = ?`)
     .bind(did)
     .all<{ uri: string }>();
 
-  let vectorDeleteFailed = false;
-
   if (docs.length > 0) {
     const ids = docs.map((d) => d.uri);
-    // Chunk to stay under Vectorize batch limits (1000/batch is safe)
     const CHUNK_SIZE = 500;
     for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
       try {
         await vectors.deleteByIds(ids.slice(i, i + CHUNK_SIZE));
       } catch (err) {
-        console.error(
-          `  cleanupBridgedPublisher: vector delete failed for ${did}:`,
-          err,
-        );
-        vectorDeleteFailed = true;
-        break;
+        console.error(`  markBridgedPublisher: vector delete failed for ${did}:`, err);
+        return false;
       }
+    }
+
+    try {
+      await db.batch([
+        db.prepare(
+          `DELETE FROM recommendations WHERE document_uri IN
+             (SELECT uri FROM documents WHERE did = ?)`,
+        ).bind(did),
+        db.prepare(`DELETE FROM documents WHERE did = ?`).bind(did),
+      ]);
+    } catch (err) {
+      console.error(`  markBridgedPublisher: D1 delete failed for ${did}:`, err);
+      return false;
     }
   }
 
-  if (vectorDeleteFailed) {
-    // Abort D1 cleanup. Leaving the documents rows in place preserves the
-    // URI list needed to retry vector deletion on the next pass.
-    return false;
-  }
-
+  // Mark as bridged — the claim query's WHERE label != 'bridged' will
+  // skip this row forever, and INSERT OR IGNORE in discovery won't re-add
+  // it because the row still exists.
   try {
-    await db.batch([
-      db
-        .prepare(
-          `DELETE FROM recommendations WHERE document_uri IN
-             (SELECT uri FROM documents WHERE did = ?)`,
-        )
-        .bind(did),
-      db.prepare(`DELETE FROM documents WHERE did = ?`).bind(did),
-      db.prepare(`DELETE FROM publishers WHERE did = ?`).bind(did),
-    ]);
+    await db
+      .prepare(`UPDATE publishers SET label = 'bridged' WHERE did = ?`)
+      .bind(did)
+      .run();
     return true;
   } catch (err) {
-    console.error(`  cleanupBridgedPublisher: D1 cleanup failed for ${did}:`, err);
+    console.error(`  markBridgedPublisher: D1 update failed for ${did}:`, err);
     return false;
   }
 }
@@ -191,15 +213,11 @@ export async function syncDocumentsFromRepo(
 
   // Bridged PDSes (e.g., brid.gy) create site.standard.publication records
   // for every bridged account, so the "has a publication" filter doesn't
-  // exclude them. Remove any existing content from this publisher and drop
-  // the publisher row so we never sync from them again.
+  // exclude them. Mark the publisher row as 'bridged' so the claim query
+  // permanently skips it and lightrail's INSERT OR IGNORE doesn't re-add it.
   if (isBridgedPds(pds)) {
-    console.log(`  skipping bridged publisher ${did} (${pds}) — cleaning up`);
-    const cleaned = await cleanupBridgedPublisher(db, vectors, did);
-    if (!cleaned) {
-      // Cleanup failed partway through (likely Vectorize). Don't mark as
-      // bridged — leave the publisher in place so the 23h retry window
-      // will attempt again. Surface as an error for visibility.
+    const marked = await markBridgedPublisher(db, vectors, did);
+    if (!marked) {
       return { fetched: 0, stored: 0, errors: 1, bridged: false };
     }
     return { fetched: 0, stored: 0, errors: 0, bridged: true };
