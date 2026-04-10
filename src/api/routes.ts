@@ -547,8 +547,9 @@ function validateVoyageResponse(
   data: Record<string, unknown>,
   expectedCount: number,
 ): { ok: true; embeddings: number[][] } | { ok: false; error: string } {
-  if (!data || !Array.isArray(data.data)) {
-    return { ok: false, error: `Missing data array. Keys: ${Object.keys(data)}` };
+  if (!data || typeof data !== "object" || !Array.isArray(data.data)) {
+    const desc = !data ? "null/undefined" : `keys: ${Object.keys(data)}`;
+    return { ok: false, error: `Missing data array. Response was ${desc}` };
   }
   const items = data.data as Array<Record<string, unknown>>;
   if (items.length !== expectedCount) {
