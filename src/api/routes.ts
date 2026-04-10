@@ -575,6 +575,9 @@ function validateVoyageResponse(
   if (items.length !== expectedCount) {
     return { ok: false, error: `Expected ${expectedCount} embeddings, got ${items.length}` };
   }
+  // Sort by index to match input order — Voyage can return items out of order.
+  // Same pattern as embed.ts getEmbeddings().
+  items.sort((a, b) => (a.index as number) - (b.index as number));
   for (let i = 0; i < items.length; i++) {
     if (!Array.isArray(items[i]?.embedding)) {
       return { ok: false, error: `Item ${i} missing embedding array` };
