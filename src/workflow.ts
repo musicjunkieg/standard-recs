@@ -8,18 +8,32 @@
  * Each step is independently retried and memoized. If the Voyage API
  * rate-limits during embedding, only that step retries — likes don't
  * re-sync.
+ *
+ * Document sync is split across many sequential Workflow steps so each
+ * invocation stays under the per-invocation subrequest limit. Each step
+ * processes SYNC_DOCS_BATCH_SIZE publishers and the workflow loops until
+ * the batch returns processed === 0.
  */
 
 import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from "cloudflare:workers";
 import type { Env } from "./env.js";
 import { syncUserLikes, syncAllLikes, pruneStaleLikes } from "./sync/likes.js";
-import { syncAllDocuments } from "./sync/documents.js";
+import { runDiscovery, syncDocumentsBatch } from "./sync/documents.js";
 import { embedAll } from "./recommend/embed.js";
 import { generateAllRecommendations, generateUserRecommendations } from "./recommend/index.js";
 
 export type SyncParams =
   | { mode: "full" }
   | { mode: "user"; did: string };
+
+/** Publishers per sync-documents Workflow step.
+ *  Keep low enough that resolve+listRecords stays under the per-invocation
+ *  subrequest budget even for publishers with many pages of documents. */
+const SYNC_DOCS_BATCH_SIZE = 50;
+
+/** Hard cap on batched sync-documents steps per workflow run, to protect
+ *  against runaway loops if syncDocumentsBatch ever fails to mark progress. */
+const SYNC_DOCS_MAX_BATCHES = 300;
 
 export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
   async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep) {
@@ -34,8 +48,8 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
 
   /**
    * Single-user enrollment backfill.
-   * Syncs their likes, discovers publishers from those likes,
-   * and generates their recommendations if embeddings are available.
+   * Syncs their likes, discovers publishers, syncs documents in batches,
+   * then embeds + recommends.
    */
   private async runUserSync(did: string, step: WorkflowStep) {
     const windowDays = parseInt(this.env.WINDOW_DAYS || "30", 10);
@@ -53,13 +67,12 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
 
     console.log(`User ${did}: ${likeResult.stored} likes synced`);
 
-    // Sync documents from all publishers. syncAllDocuments internally runs
-    // lightrail + social-graph discovery to pick up any new ones before
-    // fetching the latest docs.
-    await step.do(`sync-docs-for-user-${did}`, async () => {
-      const result = await syncAllDocuments(this.env.DB);
-      return { stored: result.stored, discovered: result.discovered };
+    // Discovery + batched document sync
+    await step.do(`discover-${did}`, async () => {
+      return await runDiscovery(this.env.DB);
     });
+
+    await this.runBatchedDocumentSync(step, `user-${did}`);
 
     // Embed + recommend if we have an API key
     if (this.env.VOYAGE_API_KEY) {
@@ -109,30 +122,17 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       return result.meta.changes ?? 0;
     });
 
-    // Step 3a: Prune publishers without a valid site.standard.publication
-    // (filters out brid.gy bridged accounts that have docs but no publication)
-    const pruneResult = await step.do("prune-invalid-publishers", async () => {
-      const { pruneInvalidPublishers } = await import("./sync/discover.js");
-      return await pruneInvalidPublishers(this.env.DB, this.env.VECTORS);
+    // Step 3: Discover publishers (lightrail + social graph) in its own step
+    const discovery = await step.do("discover", async () => {
+      return await runDiscovery(this.env.DB);
     });
 
-    console.log(
-      `Publishers: pruned ${pruneResult.removed} invalid, skipped ${pruneResult.skipped} (lookup failed) of ${pruneResult.checked} checked`,
-    );
+    console.log(`Discovery: ${discovery.discovered} new publishers (${discovery.errors} errors)`);
 
-    // Step 3b: Discover publishers + sync documents
-    const docResult = await step.do("sync-documents", async () => {
-      const result = await syncAllDocuments(this.env.DB);
-      return {
-        discovered: result.discovered,
-        stored: result.stored,
-        errors: result.errors,
-      };
-    });
+    // Step 4: Batched document sync — one Workflow step per batch
+    await this.runBatchedDocumentSync(step, "full");
 
-    console.log(`Docs: ${docResult.discovered} publishers discovered, ${docResult.stored} stored`);
-
-    // Step 4: Embed
+    // Step 5: Embed
     if (this.env.VOYAGE_API_KEY) {
       const embedResult = await step.do("embed", async () => {
         const result = await embedAll(this.env.DB, this.env.VECTORS, this.env.VOYAGE_API_KEY);
@@ -141,7 +141,7 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
 
       console.log(`Embedded: ${embedResult.likes} likes, ${embedResult.documents} docs`);
 
-      // Step 5: Generate recommendations
+      // Step 6: Generate recommendations
       const recCount = await step.do("recommend", async () => {
         return await generateAllRecommendations(this.env.DB, this.env.VECTORS, topN);
       });
@@ -151,6 +151,35 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       console.log("Skipping embed + recommend — VOYAGE_API_KEY not set");
     }
 
-    return { likeResults, pruned, pruneResult, docResult };
+    return { likeResults, pruned, discovery };
+  }
+
+  /**
+   * Loop `syncDocumentsBatch` across many Workflow steps until no more
+   * publishers need syncing. Each step has its own subrequest budget.
+   * Stops at SYNC_DOCS_MAX_BATCHES as a safety cap.
+   */
+  private async runBatchedDocumentSync(
+    step: WorkflowStep,
+    scope: string,
+  ): Promise<void> {
+    for (let i = 0; i < SYNC_DOCS_MAX_BATCHES; i++) {
+      const result = await step.do(
+        `sync-documents-batch-${scope}-${i}`,
+        async () => {
+          return await syncDocumentsBatch(
+            this.env.DB,
+            this.env.VECTORS,
+            SYNC_DOCS_BATCH_SIZE,
+          );
+        },
+      );
+
+      console.log(
+        `  batch ${scope}-${i}: processed=${result.processed} stored=${result.stored} bridged=${result.bridged} errors=${result.errors}`,
+      );
+
+      if (result.processed === 0) break;
+    }
   }
 }

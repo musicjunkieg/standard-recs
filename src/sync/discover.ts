@@ -198,100 +198,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * Walk all publishers and remove any that no longer have a valid
- * site.standard.publication record. Cascades deletion to documents,
- * recommendations referencing those documents, and vectors.
- */
-export async function pruneInvalidPublishers(
-  db: D1Database,
-  vectors: VectorizeIndex,
-): Promise<{ checked: number; removed: number; skipped: number }> {
-  const { results: publishers } = await db
-    .prepare(`SELECT did FROM publishers`)
-    .all<{ did: string }>();
-
-  let removed = 0;
-  let skipped = 0;
-
-  for (const pub of publishers) {
-    const valid = await hasValidPublication(pub.did);
-    // Only delete on a definitive false. null (lookup failed) → skip and
-    // retry on the next cron — never delete data on a transient error.
-    if (valid === true) {
-      await sleep(100);
-      continue;
-    }
-    if (valid === null) {
-      skipped++;
-      console.log(`    skipping ${pub.did}: publication lookup failed, will retry`);
-      await sleep(100);
-      continue;
-    }
-
-    // Collect document URIs so we can delete their vectors
-    const { results: docs } = await db
-      .prepare(`SELECT uri FROM documents WHERE did = ?`)
-      .bind(pub.did)
-      .all<{ uri: string }>();
-
-    // Delete vectors first. If any chunk fails after retry, skip this
-    // publisher entirely to avoid orphaning vectors with no D1 row.
-    if (docs.length > 0) {
-      const uris = docs.map((d) => d.uri);
-      const ok = await deleteVectorsChunked(vectors, uris);
-      if (!ok) {
-        skipped++;
-        console.error(
-          `    skipping ${pub.did}: vector delete failed, will retry next cron`,
-        );
-        await sleep(100);
-        continue;
-      }
-    }
-
-    await db.batch([
-      db
-        .prepare(
-          `DELETE FROM recommendations WHERE document_uri IN
-             (SELECT uri FROM documents WHERE did = ?)`,
-        )
-        .bind(pub.did),
-      db.prepare(`DELETE FROM documents WHERE did = ?`).bind(pub.did),
-      db.prepare(`DELETE FROM publishers WHERE did = ?`).bind(pub.did),
-    ]);
-
-    removed++;
-    console.log(`    pruned invalid publisher: ${pub.did} (${docs.length} docs)`);
-    await sleep(100);
-  }
-
-  return { checked: publishers.length, removed, skipped };
-}
-
-/**
- * Delete vectors in chunks with one retry per chunk. Returns true on full
- * success, false if any chunk failed both attempts.
- */
-async function deleteVectorsChunked(
-  vectors: VectorizeIndex,
-  ids: string[],
-): Promise<boolean> {
-  const CHUNK_SIZE = 100;
-  for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
-    const chunk = ids.slice(i, i + CHUNK_SIZE);
-    try {
-      await vectors.deleteByIds(chunk);
-    } catch (err) {
-      console.warn(`    Vectorize delete chunk failed, retrying:`, err);
-      await sleep(500);
-      try {
-        await vectors.deleteByIds(chunk);
-      } catch (retryErr) {
-        console.error(`    Vectorize delete chunk failed after retry:`, retryErr);
-        return false;
-      }
-    }
-  }
-  return true;
-}
+// pruneInvalidPublishers used to walk every publisher and call
+// hasValidPublication on each to remove stale ones. That approach blew the
+// per-invocation subrequest limit (6500+ publishers × PDS resolve + listRecords
+// per publisher, all in one Workflow step). The cleanup job it performed is
+// now handled inline during syncDocumentsFromRepo: any publisher whose PDS
+// resolves to a bridged host gets its docs, vectors, and row deleted on the
+// spot. Dropped publications (legit publishers who deleted their publication)
+// are rare enough that we can address them with a dedicated admin endpoint
+// later if needed, rather than walking the full table every cron.

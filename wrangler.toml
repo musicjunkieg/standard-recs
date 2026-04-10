@@ -16,6 +16,10 @@ main = "src/index.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 [triggers]
 crons = ["0 6 * * *"]  # Daily at 6am UTC
 

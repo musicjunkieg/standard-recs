@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS publishers (
   did TEXT PRIMARY KEY,
   label TEXT,
   added_at TEXT NOT NULL DEFAULT (datetime('now')),
-  last_synced_at TEXT
+  last_synced_at TEXT,
+  pds_url TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_publishers_last_synced

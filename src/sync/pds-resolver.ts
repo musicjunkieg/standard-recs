@@ -66,6 +66,63 @@ export async function resolvePds(did: string): Promise<string | null> {
 }
 
 /**
+ * Resolve a DID's PDS, preferring a cached value stored in the `publishers`
+ * table over a network lookup. On a successful fresh resolve, the result is
+ * written back to D1 so subsequent runs (or other worker instances) can
+ * skip the plc.directory / did:web fetch.
+ *
+ * This is the cheap path for the sync pipeline: most publishers are resolved
+ * once, cached in D1, and never hit the network again.
+ */
+export async function resolvePdsCached(
+  db: D1Database,
+  did: string,
+): Promise<string | null> {
+  // Check D1 first
+  const row = await db
+    .prepare(`SELECT pds_url FROM publishers WHERE did = ?`)
+    .bind(did)
+    .first<{ pds_url: string | null }>();
+  if (row?.pds_url) return row.pds_url;
+
+  // Not cached — do a fresh resolve
+  const endpoint = await resolvePds(did);
+  if (endpoint) {
+    try {
+      await db
+        .prepare(`UPDATE publishers SET pds_url = ? WHERE did = ?`)
+        .bind(endpoint, did)
+        .run();
+    } catch (err) {
+      console.error(`resolvePdsCached: failed to cache pds_url for ${did}:`, err);
+    }
+  }
+  return endpoint;
+}
+
+/**
+ * Hostnames of PDS endpoints that bridge non-atproto content (RSS feeds,
+ * fediverse posts) into atproto repos. We exclude content from these
+ * bridges because it's not genuine Standard.site publishing — it's a side
+ * effect of a generic bridge creating atproto records from external feeds.
+ *
+ * brid.gy specifically creates site.standard.publication records for every
+ * bridged account, so a "has a publication" filter alone doesn't exclude
+ * them. We have to match by PDS hostname.
+ */
+const BRIDGED_PDS_HOSTS = new Set<string>(["atproto.brid.gy"]);
+
+export function isBridgedPds(pdsUrl: string | null | undefined): boolean {
+  if (!pdsUrl) return false;
+  try {
+    const host = new URL(pdsUrl).hostname.toLowerCase();
+    return BRIDGED_PDS_HOSTS.has(host);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Fetches the DID document for supported DID methods.
  *
  * @param did - The DID to resolve (supported formats include `did:plc:` and `did:web:`)
