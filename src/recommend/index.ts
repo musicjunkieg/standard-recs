@@ -72,9 +72,14 @@ export async function generateUserRecommendations(
     return [];
   }
 
-  // 2. Fetch their like vectors from Vectorize (IDs are hashed)
+  // 2. Fetch their like vectors from Vectorize (IDs are hashed).
+  // getByIds has a max of 20 IDs per call, so chunk the requests.
   const likeHashes = await vectorIds(likes.map((l) => l.uri));
-  const likeVectors = await vectors.getByIds(likeHashes);
+  const likeVectors: VectorizeVector[] = [];
+  for (let i = 0; i < likeHashes.length; i += 20) {
+    const batch = await vectors.getByIds(likeHashes.slice(i, i + 20));
+    likeVectors.push(...batch);
+  }
 
   if (likeVectors.length === 0) {
     console.log(`  ${did}: no embedded likes yet`);
