@@ -62,8 +62,13 @@ export async function syncAllDocuments(db: D1Database): Promise<DocSyncResult> {
 
   const discovered = fromLightrail + fromSocialGraph;
 
+  // Least-recently-synced publishers first. On a Workflow step retry after a
+  // timeout, publishers already processed in the previous attempt drop to the
+  // back of the queue so the retry resumes where the previous attempt crashed.
   const { results: publishers } = await db
-    .prepare(`SELECT did, label FROM publishers`)
+    .prepare(
+      `SELECT did, label FROM publishers ORDER BY last_synced_at ASC NULLS FIRST`,
+    )
     .all<{ did: string; label: string | null }>();
 
   console.log(`  Fetching documents from ${publishers.length} publishers...`);
@@ -84,6 +89,18 @@ export async function syncAllDocuments(db: D1Database): Promise<DocSyncResult> {
     } catch (err) {
       totalErrors++;
       console.error(`    Failed: ${pub.did}`, err);
+    }
+
+    // Stamp the publisher as synced regardless of outcome so a failure can't
+    // block the queue forever. Retries will eventually come back around to
+    // least-recently-synced publishers.
+    try {
+      await db
+        .prepare(`UPDATE publishers SET last_synced_at = datetime('now') WHERE did = ?`)
+        .bind(pub.did)
+        .run();
+    } catch (err) {
+      console.error(`    Failed to stamp last_synced_at for ${pub.did}:`, err);
     }
   }
 

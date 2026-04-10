@@ -53,8 +53,12 @@ CREATE TABLE IF NOT EXISTS recommendations (
 CREATE TABLE IF NOT EXISTS publishers (
   did TEXT PRIMARY KEY,
   label TEXT,
-  added_at TEXT NOT NULL DEFAULT (datetime('now'))
+  added_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_synced_at TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_publishers_last_synced
+  ON publishers(last_synced_at);
 
 CREATE TABLE IF NOT EXISTS oauth_state (
   key TEXT PRIMARY KEY,
