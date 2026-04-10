@@ -3,12 +3,7 @@
  * Publisher discovery is handled by discover.ts.
  */
 
-import {
-  seedPublishers,
-  discoverFromSocialGraph,
-  discoverViaLightrail,
-  listRecordsFromPds,
-} from "./discover.js";
+import { listRecordsFromPds } from "./discover.js";
 import { resolvePdsCached, isBridgedPds } from "./pds-resolver.js";
 
 const COLLECTION = "site.standard.document";
@@ -19,60 +14,6 @@ export type DocSyncResult = {
   stored: number;
   errors: number;
 };
-
-/**
- * Synchronizes `site.standard.document` records from discovered publishers into the local `documents` table and returns aggregated counters.
- *
- * Performs publisher seeding and discovery, fetches records from each publisher's repository, upserts documents into the database, and accumulates totals.
- *
- * @returns An object with counters:
- *  - `discovered`: the number of new publishers discovered,
- *  - `fetched`: the total number of records fetched from publishers,
- *  - `stored`: the total number of documents successfully upserted,
- *  - `errors`: the total number of errors encountered during the run
- */
-/**
- * Run publisher discovery (seed, lightrail, social graph) and return counts.
- *
- * Discovery does NOT fetch documents — it just populates the `publishers`
- * table. Document fetching is handled by `syncDocumentsBatch` which is
- * called multiple times (once per batch) by the workflow orchestrator.
- *
- * Kept as its own Workflow step so its subrequest budget is separate
- * from the sync batches.
- */
-export async function runDiscovery(
-  db: D1Database,
-): Promise<{ discovered: number; errors: number }> {
-  await seedPublishers(db);
-
-  let discoveryErrors = 0;
-
-  console.log("  Discovering publishers via lightrail...");
-  let fromLightrail = 0;
-  try {
-    fromLightrail = await discoverViaLightrail(db);
-  } catch (err) {
-    discoveryErrors++;
-    console.error("  discoverViaLightrail threw:", err);
-  }
-  console.log(`    ${fromLightrail} new publishers from lightrail`);
-
-  console.log("  Discovering publishers from social graph...");
-  let fromSocialGraph = 0;
-  try {
-    fromSocialGraph = await discoverFromSocialGraph(db);
-  } catch (err) {
-    discoveryErrors++;
-    console.error("  discoverFromSocialGraph threw:", err);
-  }
-  console.log(`    ${fromSocialGraph} new publishers from social graph`);
-
-  return {
-    discovered: fromLightrail + fromSocialGraph,
-    errors: discoveryErrors,
-  };
-}
 
 /**
  * Sync documents for a single batch of publishers.
@@ -159,17 +100,25 @@ export async function syncDocumentsBatch(
  * Delete a bridged publisher's documents, vectors, recommendations, and
  * the publisher row itself. Called inline during sync whenever a publisher
  * is detected to live on a bridged PDS (e.g., brid.gy).
+ *
+ * Returns true on full success, false if any Vectorize chunk deletion
+ * failed. On failure, the D1 rows are NOT deleted — losing them would
+ * drop the URI→vector mappings needed to ever clean up the orphaned
+ * vectors. The publisher's last_synced_at was stamped by the caller
+ * before this ran, so natural 23h retry will kick in on the next cron.
  */
 async function cleanupBridgedPublisher(
   db: D1Database,
   vectors: VectorizeIndex,
   did: string,
-): Promise<void> {
+): Promise<boolean> {
   // Collect document URIs for vector deletion
   const { results: docs } = await db
     .prepare(`SELECT uri FROM documents WHERE did = ?`)
     .bind(did)
     .all<{ uri: string }>();
+
+  let vectorDeleteFailed = false;
 
   if (docs.length > 0) {
     const ids = docs.map((d) => d.uri);
@@ -179,10 +128,20 @@ async function cleanupBridgedPublisher(
       try {
         await vectors.deleteByIds(ids.slice(i, i + CHUNK_SIZE));
       } catch (err) {
-        console.error(`  cleanupBridgedPublisher: vector delete failed for ${did}:`, err);
-        // Don't bail — proceed with D1 cleanup so we don't keep re-encountering this publisher
+        console.error(
+          `  cleanupBridgedPublisher: vector delete failed for ${did}:`,
+          err,
+        );
+        vectorDeleteFailed = true;
+        break;
       }
     }
+  }
+
+  if (vectorDeleteFailed) {
+    // Abort D1 cleanup. Leaving the documents rows in place preserves the
+    // URI list needed to retry vector deletion on the next pass.
+    return false;
   }
 
   try {
@@ -196,8 +155,10 @@ async function cleanupBridgedPublisher(
       db.prepare(`DELETE FROM documents WHERE did = ?`).bind(did),
       db.prepare(`DELETE FROM publishers WHERE did = ?`).bind(did),
     ]);
+    return true;
   } catch (err) {
     console.error(`  cleanupBridgedPublisher: D1 cleanup failed for ${did}:`, err);
+    return false;
   }
 }
 
@@ -231,7 +192,13 @@ export async function syncDocumentsFromRepo(
   // the publisher row so we never sync from them again.
   if (isBridgedPds(pds)) {
     console.log(`  skipping bridged publisher ${did} (${pds}) — cleaning up`);
-    await cleanupBridgedPublisher(db, vectors, did);
+    const cleaned = await cleanupBridgedPublisher(db, vectors, did);
+    if (!cleaned) {
+      // Cleanup failed partway through (likely Vectorize). Don't mark as
+      // bridged — leave the publisher in place so the 23h retry window
+      // will attempt again. Surface as an error for visibility.
+      return { fetched: 0, stored: 0, errors: 1, bridged: false };
+    }
     return { fetched: 0, stored: 0, errors: 0, bridged: true };
   }
 

@@ -18,7 +18,8 @@
 import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from "cloudflare:workers";
 import type { Env } from "./env.js";
 import { syncUserLikes, syncAllLikes, pruneStaleLikes } from "./sync/likes.js";
-import { runDiscovery, syncDocumentsBatch } from "./sync/documents.js";
+import { syncDocumentsBatch } from "./sync/documents.js";
+import { runDiscovery } from "./sync/discover.js";
 import { embedAll } from "./recommend/embed.js";
 import { generateAllRecommendations, generateUserRecommendations } from "./recommend/index.js";
 
@@ -172,6 +173,7 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       DEFAULT_SYNC_DOCS_MAX_BATCHES,
     );
 
+    let drained = false;
     for (let i = 0; i < maxBatches; i++) {
       const result = await step.do(
         `sync-documents-batch-${scope}-${i}`,
@@ -188,7 +190,19 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
         `  batch ${scope}-${i}: processed=${result.processed} stored=${result.stored} bridged=${result.bridged} errors=${result.errors}`,
       );
 
-      if (result.processed === 0) break;
+      // A short batch means syncDocumentsBatch couldn't claim `batchSize`
+      // publishers — there's nothing left to do. Break immediately instead
+      // of doing one more round-trip just to see processed === 0.
+      if (result.processed < batchSize) {
+        drained = true;
+        break;
+      }
+    }
+
+    if (!drained) {
+      console.warn(
+        `  sync-documents (${scope}): hit SYNC_DOCS_MAX_BATCHES cap (${maxBatches} × ${batchSize} = ${maxBatches * batchSize} publishers). Queue may be truncated; next cron will resume.`,
+      );
     }
   }
 }

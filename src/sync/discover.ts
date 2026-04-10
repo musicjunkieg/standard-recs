@@ -207,3 +207,45 @@ function sleep(ms: number): Promise<void> {
 // spot. Dropped publications (legit publishers who deleted their publication)
 // are rare enough that we can address them with a dedicated admin endpoint
 // later if needed, rather than walking the full table every cron.
+
+/**
+ * Run publisher discovery (seed, lightrail, social graph) and return counts.
+ *
+ * Discovery does NOT fetch documents — it just populates the `publishers`
+ * table. Document fetching is handled by `syncDocumentsBatch` in documents.ts.
+ *
+ * Kept as its own Workflow step so its subrequest budget is separate
+ * from the sync batches.
+ */
+export async function runDiscovery(
+  db: D1Database,
+): Promise<{ discovered: number; errors: number }> {
+  await seedPublishers(db);
+
+  let discoveryErrors = 0;
+
+  console.log("  Discovering publishers via lightrail...");
+  let fromLightrail = 0;
+  try {
+    fromLightrail = await discoverViaLightrail(db);
+  } catch (err) {
+    discoveryErrors++;
+    console.error("  discoverViaLightrail threw:", err);
+  }
+  console.log(`    ${fromLightrail} new publishers from lightrail`);
+
+  console.log("  Discovering publishers from social graph...");
+  let fromSocialGraph = 0;
+  try {
+    fromSocialGraph = await discoverFromSocialGraph(db);
+  } catch (err) {
+    discoveryErrors++;
+    console.error("  discoverFromSocialGraph threw:", err);
+  }
+  console.log(`    ${fromSocialGraph} new publishers from social graph`);
+
+  return {
+    discovered: fromLightrail + fromSocialGraph,
+    errors: discoveryErrors,
+  };
+}
