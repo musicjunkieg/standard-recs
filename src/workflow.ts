@@ -73,10 +73,16 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       return await runDiscovery(this.env.DB);
     });
 
-    await this.runBatchedDocumentSync(step, `user-${did}`);
+    const syncStatus = await this.runBatchedDocumentSync(step, `user-${did}`);
 
-    // Embed + recommend if we have an API key
-    if (this.env.VOYAGE_API_KEY) {
+    // Embed + recommend only when the sync actually completed. An incomplete
+    // corpus produces misleading per-user recommendations and wastes Voyage
+    // API quota re-embedding partial state every enrollment.
+    if (!syncStatus.drained) {
+      console.log(
+        `Skipping embed + recommend for ${did} — document sync was truncated by the batch cap.`,
+      );
+    } else if (this.env.VOYAGE_API_KEY) {
       await step.do(`embed-for-user-${did}`, async () => {
         const result = await embedAll(this.env.DB, this.env.VECTORS, this.env.VOYAGE_API_KEY);
         return { likes: result.likes, documents: result.documents };
@@ -131,10 +137,16 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
     console.log(`Discovery: ${discovery.discovered} new publishers (${discovery.errors} errors)`);
 
     // Step 4: Batched document sync — one Workflow step per batch
-    await this.runBatchedDocumentSync(step, "full");
+    const syncStatus = await this.runBatchedDocumentSync(step, "full");
 
-    // Step 5: Embed
-    if (this.env.VOYAGE_API_KEY) {
+    // Step 5: Embed + recommend — only when the sync actually completed.
+    // An incomplete corpus would produce misleading recommendations and
+    // burn Voyage API quota on every cron until the corpus is whole.
+    if (!syncStatus.drained) {
+      console.log(
+        "Skipping embed + recommend — document sync was truncated by the batch cap.",
+      );
+    } else if (this.env.VOYAGE_API_KEY) {
       const embedResult = await step.do("embed", async () => {
         const result = await embedAll(this.env.DB, this.env.VECTORS, this.env.VOYAGE_API_KEY);
         return { likes: result.likes, documents: result.documents, errors: result.errors };
@@ -152,18 +164,23 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       console.log("Skipping embed + recommend — VOYAGE_API_KEY not set");
     }
 
-    return { likeResults, pruned, discovery };
+    return { likeResults, pruned, discovery, syncDrained: syncStatus.drained };
   }
 
   /**
    * Loop `syncDocumentsBatch` across many Workflow steps until no more
    * publishers need syncing. Each step has its own subrequest budget.
    * Stops at SYNC_DOCS_MAX_BATCHES (from env) as a safety cap.
+   *
+   * Returns `drained: true` when every pending publisher was processed.
+   * Returns `drained: false` when the loop exited because it hit the
+   * max-batches cap — callers MUST skip downstream steps (embed,
+   * recommend) because the corpus is incomplete.
    */
   private async runBatchedDocumentSync(
     step: WorkflowStep,
     scope: string,
-  ): Promise<void> {
+  ): Promise<{ drained: boolean }> {
     const batchSize = parseIntOrDefault(
       this.env.SYNC_DOCS_BATCH_SIZE,
       DEFAULT_SYNC_DOCS_BATCH_SIZE,
@@ -201,8 +218,10 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
 
     if (!drained) {
       console.warn(
-        `  sync-documents (${scope}): hit SYNC_DOCS_MAX_BATCHES cap (${maxBatches} × ${batchSize} = ${maxBatches * batchSize} publishers). Queue may be truncated; next cron will resume.`,
+        `  sync-documents (${scope}): hit SYNC_DOCS_MAX_BATCHES cap (${maxBatches} × ${batchSize} = ${maxBatches * batchSize} publishers). Queue truncated; skipping embed + recommend until the next run completes the corpus.`,
       );
     }
+
+    return { drained };
   }
 }

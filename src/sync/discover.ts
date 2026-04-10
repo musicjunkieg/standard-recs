@@ -18,44 +18,9 @@
 
 import { resolvePds } from "./pds-resolver.js";
 import { listReposByCollection } from "./lightrail.js";
-import { friendlyFetch } from "./fetch-helper.js";
+import { listRecordsFromPds } from "./pds-fetch.js";
 
 const PUBLICATION_COLLECTION = "site.standard.publication";
-
-/**
- * Query a specific PDS for records in a given collection using com.atproto.repo.listRecords.
- *
- * @param pds - Base URL of the PDS (e.g., `https://pds.example.com`)
- * @param did - Repository DID to query (the `repo` parameter)
- * @param collection - Collection name to list (the `collection` parameter)
- * @param limit - Maximum number of records to return (default: 100)
- * @param cursor - Optional pagination cursor
- * @returns The parsed response `{ records: [{ uri, cid, value }...], cursor? }`, or `null` when the HTTP response is not OK
- *
- * Note: network or JSON parsing errors are not caught here and will propagate to the caller.
- */
-async function listRecordsFromPds<T = unknown>(
-  pds: string,
-  did: string,
-  collection: string,
-  limit = 100,
-  cursor?: string,
-): Promise<{ records: Array<{ uri: string; cid: string; value: T }>; cursor?: string } | null> {
-  const url = new URL(`${pds}/xrpc/com.atproto.repo.listRecords`);
-  url.searchParams.set("repo", did);
-  url.searchParams.set("collection", collection);
-  url.searchParams.set("limit", String(limit));
-  if (cursor) url.searchParams.set("cursor", cursor);
-
-  const res = await friendlyFetch(url.toString());
-  if (!res.ok) return null;
-  return (await res.json()) as {
-    records: Array<{ uri: string; cid: string; value: T }>;
-    cursor?: string;
-  };
-}
-
-export { listRecordsFromPds };
 
 /**
  * Determine whether a DID has at least one site.standard.publication record.

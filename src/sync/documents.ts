@@ -3,7 +3,7 @@
  * Publisher discovery is handled by discover.ts.
  */
 
-import { listRecordsFromPds } from "./discover.js";
+import { listRecordsFromPds } from "./pds-fetch.js";
 import { resolvePdsCached, isBridgedPds } from "./pds-resolver.js";
 
 const COLLECTION = "site.standard.document";
