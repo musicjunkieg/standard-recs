@@ -96,9 +96,10 @@ export async function generateUserRecommendations(
   // 4. Query Vectorize for nearest documents.
   // returnMetadata must be "all" (not "indexed") because the uri field
   // is stored in metadata but not registered as a metadata index.
-  // "all" limits topK to 50; our topN*2 (default 20) is well under.
+  // "all" limits topK to 50 per Cloudflare docs. Clamp to stay under.
+  const topK = Math.min(topN * 2, 50);
   const matches = await vectors.query(tasteVector, {
-    topK: topN * 2, // Fetch extra so filtering still yields topN
+    topK,
     namespace: "documents",
     returnValues: false,
     returnMetadata: "all",
