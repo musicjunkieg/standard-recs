@@ -423,89 +423,109 @@ api.post("/admin/debug-embed", async (c) => {
   const results: Array<{ step: string; ok: boolean; detail: unknown }> = [];
 
   // Test with real likes
-  try {
-    const { results: likes } = await c.env.DB
-      .prepare(
-        `SELECT uri, liked_post_text FROM likes
-         WHERE liked_post_text IS NOT NULL AND liked_post_text != ''
-         LIMIT 5`,
-      )
-      .all<{ uri: string; liked_post_text: string }>();
+  {
+    let currentStep = "likes-query";
+    try {
+      const { results: likes } = await c.env.DB
+        .prepare(
+          `SELECT uri, liked_post_text FROM likes
+           WHERE liked_post_text IS NOT NULL AND liked_post_text != ''
+           LIMIT 5`,
+        )
+        .all<{ uri: string; liked_post_text: string }>();
 
-    if (likes.length === 0) {
-      results.push({ step: "likes-query", ok: true, detail: "no likes with text" });
-    } else {
-      const texts = likes.map((l) => l.liked_post_text);
-      const res = await fetchVoyage(c.env.VOYAGE_API_KEY, texts, "query");
-
-      if (!res.ok) {
-        const body = await res.text();
-        results.push({ step: "likes-voyage", ok: false, detail: { status: res.status, body: body.slice(0, 1000) } });
+      if (likes.length === 0) {
+        results.push({ step: "likes-query", ok: true, detail: "no likes with text" });
       } else {
-        const data = await res.json() as Record<string, unknown>;
-        const validation = validateVoyageResponse(data, likes.length);
-        if (!validation.ok) {
-          results.push({ step: "likes-voyage-parse", ok: false, detail: validation.error });
+        currentStep = "likes-voyage";
+        const texts = likes.map((l) => l.liked_post_text);
+        const res = await fetchVoyage(c.env.VOYAGE_API_KEY, texts, "query");
+
+        if (!res.ok) {
+          const body = await res.text();
+          results.push({ step: "likes-voyage", ok: false, detail: { status: res.status, body } });
         } else {
-          const embeddings = validation.embeddings;
-          const vectors: VectorizeVector[] = embeddings.map((emb, i) => ({
-            id: likes[i].uri,
-            values: emb,
-            namespace: "likes",
-            metadata: { type: "like" },
-          }));
-          await c.env.VECTORS.upsert(vectors);
-          results.push({ step: "likes-embed", ok: true, detail: { count: likes.length, dimensions: embeddings[0].length } });
+          currentStep = "likes-voyage-parse";
+          const data = await res.json() as Record<string, unknown>;
+          const validation = validateVoyageResponse(data, likes.length);
+          if (!validation.ok) {
+            results.push({ step: "likes-voyage-parse", ok: false, detail: validation.error });
+          } else {
+            currentStep = "likes-upsert";
+            const embeddings = validation.embeddings;
+            const probeIds = likes.map((l) => `debug-${l.uri}`);
+            const vectors: VectorizeVector[] = embeddings.map((emb, i) => ({
+              id: probeIds[i],
+              values: emb,
+              namespace: "debug-likes",
+              metadata: { type: "like" },
+            }));
+            await c.env.VECTORS.upsert(vectors);
+
+            currentStep = "likes-cleanup";
+            await c.env.VECTORS.deleteByIds(probeIds);
+            results.push({ step: "likes-embed", ok: true, detail: { count: likes.length, dimensions: embeddings[0].length } });
+          }
         }
       }
+    } catch (err) {
+      results.push({ step: currentStep, ok: false, detail: err instanceof Error ? err.message : String(err) });
     }
-  } catch (err) {
-    results.push({ step: "likes", ok: false, detail: err instanceof Error ? err.message : String(err) });
   }
 
   // Test with real documents
-  try {
-    const { results: docs } = await c.env.DB
-      .prepare(
-        `SELECT uri, title, description, text_content FROM documents
-         WHERE (text_content IS NOT NULL AND text_content != '')
-            OR (description IS NOT NULL AND description != '')
-         LIMIT 5`,
-      )
-      .all<{ uri: string; title: string; description: string | null; text_content: string | null }>();
+  {
+    let currentStep = "docs-query";
+    try {
+      const { results: docs } = await c.env.DB
+        .prepare(
+          `SELECT uri, title, description, text_content FROM documents
+           WHERE (text_content IS NOT NULL AND text_content != '')
+              OR (description IS NOT NULL AND description != '')
+           LIMIT 5`,
+        )
+        .all<{ uri: string; title: string; description: string | null; text_content: string | null }>();
 
-    if (docs.length === 0) {
-      results.push({ step: "docs-query", ok: true, detail: "no docs with content" });
-    } else {
-      const texts = docs.map((d) => {
-        const body = d.text_content || d.description || "";
-        return `${d.title}\n\n${body}`.slice(0, 16000);
-      });
-      const res = await fetchVoyage(c.env.VOYAGE_API_KEY, texts, "document");
-
-      if (!res.ok) {
-        const body = await res.text();
-        results.push({ step: "docs-voyage", ok: false, detail: { status: res.status, body: body.slice(0, 1000) } });
+      if (docs.length === 0) {
+        results.push({ step: "docs-query", ok: true, detail: "no docs with content" });
       } else {
-        const data = await res.json() as Record<string, unknown>;
-        const validation = validateVoyageResponse(data, docs.length);
-        if (!validation.ok) {
-          results.push({ step: "docs-voyage-parse", ok: false, detail: validation.error });
+        currentStep = "docs-voyage";
+        const texts = docs.map((d) => {
+          const body = d.text_content || d.description || "";
+          return `${d.title}\n\n${body}`.slice(0, 16000);
+        });
+        const res = await fetchVoyage(c.env.VOYAGE_API_KEY, texts, "document");
+
+        if (!res.ok) {
+          const body = await res.text();
+          results.push({ step: "docs-voyage", ok: false, detail: { status: res.status, body } });
         } else {
-          const embeddings = validation.embeddings;
-          const vectors: VectorizeVector[] = embeddings.map((emb, i) => ({
-            id: docs[i].uri,
-            values: emb,
-            namespace: "documents",
-            metadata: { type: "document", title: docs[i].title },
-          }));
-          await c.env.VECTORS.upsert(vectors);
-          results.push({ step: "docs-embed", ok: true, detail: { count: docs.length, dimensions: embeddings[0].length } });
+          currentStep = "docs-voyage-parse";
+          const data = await res.json() as Record<string, unknown>;
+          const validation = validateVoyageResponse(data, docs.length);
+          if (!validation.ok) {
+            results.push({ step: "docs-voyage-parse", ok: false, detail: validation.error });
+          } else {
+            currentStep = "docs-upsert";
+            const embeddings = validation.embeddings;
+            const probeIds = docs.map((d) => `debug-${d.uri}`);
+            const vectors: VectorizeVector[] = embeddings.map((emb, i) => ({
+              id: probeIds[i],
+              values: emb,
+              namespace: "debug-documents",
+              metadata: { type: "document", title: docs[i].title },
+            }));
+            await c.env.VECTORS.upsert(vectors);
+
+            currentStep = "docs-cleanup";
+            await c.env.VECTORS.deleteByIds(probeIds);
+            results.push({ step: "docs-embed", ok: true, detail: { count: docs.length, dimensions: embeddings[0].length } });
+          }
         }
       }
+    } catch (err) {
+      results.push({ step: currentStep, ok: false, detail: err instanceof Error ? err.message : String(err) });
     }
-  } catch (err) {
-    results.push({ step: "docs", ok: false, detail: err instanceof Error ? err.message : String(err) });
   }
 
   const allOk = results.every((r) => r.ok);
