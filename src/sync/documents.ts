@@ -3,10 +3,14 @@
  * Publisher discovery is handled by discover.ts.
  */
 
-import { AtpAgent } from "@atproto/api";
-import { seedPublishers, discoverFromSocialGraph } from "./discover.js";
+import {
+  seedPublishers,
+  discoverFromSocialGraph,
+  discoverViaLightrail,
+  listRecordsFromPds,
+} from "./discover.js";
+import { resolvePds } from "./pds-resolver.js";
 
-const agent = new AtpAgent({ service: "https://public.api.bsky.app" });
 const COLLECTION = "site.standard.document";
 
 export type DocSyncResult = {
@@ -19,9 +23,15 @@ export type DocSyncResult = {
 export async function syncAllDocuments(db: D1Database): Promise<DocSyncResult> {
   await seedPublishers(db);
 
+  console.log("  Discovering publishers via lightrail...");
+  const fromLightrail = await discoverViaLightrail(db);
+  console.log(`    ${fromLightrail} new publishers from lightrail`);
+
   console.log("  Discovering publishers from social graph...");
-  const discovered = await discoverFromSocialGraph(db);
-  console.log(`    ${discovered} new publishers found`);
+  const fromSocialGraph = await discoverFromSocialGraph(db);
+  console.log(`    ${fromSocialGraph} new publishers from social graph`);
+
+  const discovered = fromLightrail + fromSocialGraph;
 
   const { results: publishers } = await db
     .prepare(`SELECT did, label FROM publishers`)
@@ -55,20 +65,32 @@ export async function syncDocumentsFromRepo(
   db: D1Database,
   did: string,
 ): Promise<{ fetched: number; stored: number; errors: number }> {
+  const pds = await resolvePds(did);
+  if (!pds) {
+    console.error(`  syncDocumentsFromRepo: cannot resolve PDS for ${did}`);
+    return { fetched: 0, stored: 0, errors: 1 };
+  }
+
   let cursor: string | undefined;
   let fetched = 0;
   let stored = 0;
   let errors = 0;
 
   while (true) {
-    const res = await agent.com.atproto.repo.listRecords({
-      repo: did,
-      collection: COLLECTION,
-      limit: 100,
+    const body = await listRecordsFromPds<StandardDocument>(
+      pds,
+      did,
+      COLLECTION,
+      100,
       cursor,
-    });
+    );
 
-    const { records, cursor: nextCursor } = res.data;
+    if (body === null) {
+      // PDS call failed — surface as an error so the caller knows something went wrong
+      return { fetched, stored, errors: errors + 1 };
+    }
+
+    const { records, cursor: nextCursor } = body;
     if (!records.length) break;
 
     const stmts: D1PreparedStatement[] = [];
@@ -76,8 +98,7 @@ export async function syncDocumentsFromRepo(
     for (const record of records) {
       fetched++;
       try {
-        const doc = record.value as StandardDocument;
-        stmts.push(upsertDocumentStmt(db, record.uri, did, doc));
+        stmts.push(upsertDocumentStmt(db, record.uri, did, record.value));
         stored++;
       } catch (err) {
         errors++;

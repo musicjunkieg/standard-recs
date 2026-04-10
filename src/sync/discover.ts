@@ -1,44 +1,74 @@
 /**
- * Publisher discovery — find DIDs that publish site.standard.document records.
+ * Publisher discovery — find DIDs that publish site.standard.publication records.
  *
  * Three methods, all running on Cloudflare Workers:
  *
  * 1. SEED: Bootstrap with known Standard.site platform DIDs.
  *    Runs once on first cron, inserts any missing seeds.
  *
- * 2. SOCIAL GRAPH: Check if authors of liked posts also
- *    publish documents. Runs every cron cycle.
+ * 2. LIGHTRAIL: Query lightrail.microcosm.blue for every DID in the atmosphere
+ *    that has at least one site.standard.publication record. This is the primary
+ *    discovery path — it replaces the old social-graph-based approach which only
+ *    found publishers we happened to see in users' likes.
  *
- * 3. JETSTREAM SCAN: Brief WebSocket connection to Jetstream
- *    filtered to site.standard.document creates. Catches
- *    active publishers in real time. Triggered via admin endpoint.
+ * 3. JETSTREAM SCAN: Brief WebSocket connection to Jetstream filtered to
+ *    site.standard.publication + site.standard.document creates. Runs in a
+ *    Durable Object for real-time publisher + document updates between cron runs.
  */
 
-import { AtpAgent } from "@atproto/api";
+import { resolvePds } from "./pds-resolver.js";
+import { listReposByCollection } from "./lightrail.js";
+import { friendlyFetch } from "./fetch-helper.js";
 
-const agent = new AtpAgent({ service: "https://public.api.bsky.app" });
 const PUBLICATION_COLLECTION = "site.standard.publication";
 
 /**
+ * Call com.atproto.repo.listRecords against a specific PDS.
+ * Returns the parsed body, or null on failure.
+ */
+async function listRecordsFromPds<T = unknown>(
+  pds: string,
+  did: string,
+  collection: string,
+  limit = 100,
+  cursor?: string,
+): Promise<{ records: Array<{ uri: string; cid: string; value: T }>; cursor?: string } | null> {
+  const url = new URL(`${pds}/xrpc/com.atproto.repo.listRecords`);
+  url.searchParams.set("repo", did);
+  url.searchParams.set("collection", collection);
+  url.searchParams.set("limit", String(limit));
+  if (cursor) url.searchParams.set("cursor", cursor);
+
+  const res = await friendlyFetch(url.toString());
+  if (!res.ok) return null;
+  return (await res.json()) as {
+    records: Array<{ uri: string; cid: string; value: T }>;
+    cursor?: string;
+  };
+}
+
+export { listRecordsFromPds };
+
+/**
  * Check whether a DID has at least one site.standard.publication record.
- * Used to filter out brid.gy bridged accounts that have documents but no
- * actual Standard.site publication.
+ * Resolves the PDS and calls listRecords directly — cannot use the appview
+ * because it doesn't implement listRecords.
  *
  * Returns:
  *   true  — definitively has a publication
- *   false — definitively has none
+ *   false — definitively has none (but PDS was reachable)
  *   null  — lookup failed (transient error, treat as "unknown — skip for now")
  */
 export async function hasValidPublication(
   did: string,
 ): Promise<boolean | null> {
+  const pds = await resolvePds(did);
+  if (!pds) return null;
+
   try {
-    const res = await agent.com.atproto.repo.listRecords({
-      repo: did,
-      collection: PUBLICATION_COLLECTION,
-      limit: 1,
-    });
-    return res.data.records.length > 0;
+    const body = await listRecordsFromPds(pds, did, PUBLICATION_COLLECTION, 1);
+    if (body === null) return null;
+    return body.records.length > 0;
   } catch (err) {
     console.error(`hasValidPublication lookup failed for ${did}:`, err);
     return null;
@@ -53,7 +83,7 @@ export async function hasValidPublication(
  * Find these from:
  *   - https://standard.site/docs/implementations/
  *   - The Standard.site community
- *   - pdsls.dev searches for site.standard.document
+ *   - pdsls.dev searches for site.standard.publication
  */
 const SEED_PUBLISHERS: Array<{ did: string; label: string }> = [
   // Add known publisher DIDs here, e.g.:
@@ -86,8 +116,39 @@ export async function seedPublishers(db: D1Database): Promise<number> {
 }
 
 /**
+ * Discover publishers via lightrail.microcosm.blue.
+ * Returns every DID with at least one site.standard.publication record.
+ *
+ * Lightrail only indexes the firehose, so the returned set already excludes
+ * brid.gy bridged accounts that emit site.standard.document records without
+ * ever registering a site.standard.publication.
+ */
+export async function discoverViaLightrail(db: D1Database): Promise<number> {
+  let discovered = 0;
+
+  try {
+    for await (const did of listReposByCollection(PUBLICATION_COLLECTION)) {
+      const result = await db
+        .prepare(
+          `INSERT OR IGNORE INTO publishers (did, label) VALUES (?, ?)`,
+        )
+        .bind(did, "auto:lightrail")
+        .run();
+      if ((result.meta.changes ?? 0) > 0) discovered++;
+    }
+  } catch (err) {
+    console.error("discoverViaLightrail failed:", err);
+  }
+
+  return discovered;
+}
+
+/**
  * Discover publishers from users' social graphs.
- * Checks if authors of liked posts also publish documents.
+ * Checks if authors of liked posts also have a site.standard.publication.
+ *
+ * Kept as a secondary path alongside lightrail — useful if lightrail is down
+ * or lags, and costs little (capped at 50 candidates).
  */
 export async function discoverFromSocialGraph(
   db: D1Database,
