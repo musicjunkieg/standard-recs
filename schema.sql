@@ -61,6 +61,13 @@ CREATE TABLE IF NOT EXISTS publishers (
 CREATE INDEX IF NOT EXISTS idx_publishers_last_synced
   ON publishers(last_synced_at);
 
+CREATE TABLE IF NOT EXISTS publications (
+  uri TEXT PRIMARY KEY,
+  did TEXT NOT NULL,
+  url TEXT NOT NULL,
+  name TEXT
+);
+
 CREATE TABLE IF NOT EXISTS oauth_state (
   key TEXT PRIMARY KEY,
   state TEXT NOT NULL,

@@ -119,9 +119,11 @@ api.get("/recs/:did", async (c) => {
 
   const { results: recs } = await c.env.DB.prepare(
     `SELECT r.document_uri, r.score, r.generated_at,
-            d.title, d.description, d.site, d.path, d.tags, d.published_at
+            d.title, d.description, d.site, d.path, d.tags, d.published_at,
+            p.url AS publication_url, p.name AS publication_name
      FROM recommendations r
      JOIN documents d ON r.document_uri = d.uri
+     LEFT JOIN publications p ON d.site = p.uri
      WHERE r.did = ?
      ORDER BY r.score DESC`,
   )
@@ -139,8 +141,14 @@ api.get("/recs/:did", async (c) => {
           score: r.score as number,
           title: r.title as string,
           description: r.description as string | null,
-          url: buildDocumentUrl(r.site as string | null, r.path as string | null),
-          site: r.site as string | null,
+          url: buildDocumentUrl(
+            r.publication_url as string | null,
+            r.site as string | null,
+            r.path as string | null,
+          ),
+          site: (r.publication_name as string | null)
+            ?? (r.publication_url as string | null)?.replace(/^https?:\/\//, "").replace(/\/$/, "")
+            ?? null,
         })),
       }),
     );
@@ -154,7 +162,12 @@ api.get("/recs/:did", async (c) => {
       score: r.score,
       title: r.title,
       description: r.description,
-      url: buildDocumentUrl(r.site as string | null, r.path as string | null),
+      url: buildDocumentUrl(
+        r.publication_url as string | null,
+        r.site as string | null,
+        r.path as string | null,
+      ),
+      publication: r.publication_name ?? r.publication_url ?? null,
       tags: r.tags ? JSON.parse(r.tags as string) : [],
       published_at: r.published_at,
       generated_at: r.generated_at,
@@ -590,14 +603,29 @@ function validateVoyageResponse(
   };
 }
 
+/**
+ * Build a clickable URL for a document.
+ *
+ * @param publicationUrl - The publication's web URL (from the publications table), or null
+ * @param site - The document's site field (may be an at:// URI or an https URL)
+ * @param path - The document's path within the publication
+ */
 function buildDocumentUrl(
+  publicationUrl: string | null,
   site: string | null,
   path: string | null,
 ): string | null {
-  if (!site) return null;
-  if (site.startsWith("at://")) return null;
-  const base = site.replace(/\/$/, "");
-  return path ? `${base}${path}` : base;
+  // Prefer the publication's resolved web URL
+  if (publicationUrl) {
+    const base = publicationUrl.replace(/\/$/, "");
+    return path ? `${base}${path}` : base;
+  }
+  // Fall back to site if it's already an https URL
+  if (site && !site.startsWith("at://")) {
+    const base = site.replace(/\/$/, "");
+    return path ? `${base}${path}` : base;
+  }
+  return null;
 }
 
 export { api };

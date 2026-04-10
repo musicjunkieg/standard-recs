@@ -6,7 +6,14 @@
 import { listRecordsFromPds } from "./pds-fetch.js";
 import { resolvePdsCached, isBridgedPds } from "./pds-resolver.js";
 
-const COLLECTION = "site.standard.document";
+const DOCUMENT_COLLECTION = "site.standard.document";
+const PUBLICATION_COLLECTION = "site.standard.publication";
+
+type StandardPublication = {
+  $type: "site.standard.publication";
+  url: string;
+  name?: string;
+};
 
 export type DocSyncResult = {
   discovered: number;
@@ -223,6 +230,29 @@ export async function syncDocumentsFromRepo(
     return { fetched: 0, stored: 0, errors: 0, bridged: true };
   }
 
+  // Sync publication records first so we have URLs for document links.
+  // Publications are few (typically 1-2 per publisher), so a single page suffices.
+  try {
+    const pubBody = await listRecordsFromPds<StandardPublication>(
+      pds, did, PUBLICATION_COLLECTION, 100,
+    );
+    if (pubBody && pubBody.records.length > 0) {
+      const stmts = pubBody.records
+        .filter((r) => r.value.url)
+        .map((r) =>
+          db
+            .prepare(
+              `INSERT OR REPLACE INTO publications (uri, did, url, name) VALUES (?, ?, ?, ?)`,
+            )
+            .bind(r.uri, did, r.value.url, r.value.name ?? null),
+        );
+      if (stmts.length > 0) await db.batch(stmts);
+    }
+  } catch (err) {
+    // Non-fatal — documents will just lack clickable URLs for this publisher
+    console.error(`  Failed to sync publications for ${did}:`, err);
+  }
+
   let cursor: string | undefined;
   let fetched = 0;
   let stored = 0;
@@ -234,7 +264,7 @@ export async function syncDocumentsFromRepo(
       body = await listRecordsFromPds<StandardDocument>(
         pds,
         did,
-        COLLECTION,
+        DOCUMENT_COLLECTION,
         100,
         cursor,
       );
