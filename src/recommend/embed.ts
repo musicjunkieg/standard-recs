@@ -12,6 +12,8 @@
  * Free tier: 200M tokens — covers this project for months.
  */
 
+import { vectorIds } from "./vector-id.js";
+
 export const VOYAGE_API = "https://api.voyageai.com/v1/embeddings";
 export const VOYAGE_MODEL = "voyage-3.5-lite";
 export const EMBEDDING_DIMENSIONS = 1024;
@@ -53,11 +55,12 @@ export async function embedAll(
         const texts = batch.map((l) => l.liked_post_text);
         const embeddings = await getEmbeddings(texts, apiKey, "query");
 
+        const ids = await vectorIds(batch.map((l) => l.uri));
         const vectorBatch: VectorizeVector[] = embeddings.map((values, i) => ({
-          id: batch[i].uri,
+          id: ids[i],
           values,
           namespace: "likes",
-          metadata: { type: "like" },
+          metadata: { type: "like", uri: batch[i].uri },
         }));
 
         await vectors.upsert(vectorBatch);
@@ -96,11 +99,12 @@ export async function embedAll(
 
         const embeddings = await getEmbeddings(texts, apiKey, "document");
 
+        const ids = await vectorIds(batch.map((d) => d.uri));
         const vectorBatch: VectorizeVector[] = embeddings.map((values, i) => ({
-          id: batch[i].uri,
+          id: ids[i],
           values,
           namespace: "documents",
-          metadata: { type: "document", title: batch[i].title },
+          metadata: { type: "document", title: batch[i].title, uri: batch[i].uri },
         }));
 
         await vectors.upsert(vectorBatch);
