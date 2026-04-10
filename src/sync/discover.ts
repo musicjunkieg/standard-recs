@@ -1,44 +1,77 @@
 /**
- * Publisher discovery — find DIDs that publish site.standard.document records.
+ * Publisher discovery — find DIDs that publish site.standard.publication records.
  *
  * Three methods, all running on Cloudflare Workers:
  *
  * 1. SEED: Bootstrap with known Standard.site platform DIDs.
  *    Runs once on first cron, inserts any missing seeds.
  *
- * 2. SOCIAL GRAPH: Check if authors of liked posts also
- *    publish documents. Runs every cron cycle.
+ * 2. LIGHTRAIL: Query lightrail.microcosm.blue for every DID in the atmosphere
+ *    that has at least one site.standard.publication record. This is the primary
+ *    discovery path — it replaces the old social-graph-based approach which only
+ *    found publishers we happened to see in users' likes.
  *
- * 3. JETSTREAM SCAN: Brief WebSocket connection to Jetstream
- *    filtered to site.standard.document creates. Catches
- *    active publishers in real time. Triggered via admin endpoint.
+ * 3. JETSTREAM SCAN: Brief WebSocket connection to Jetstream filtered to
+ *    site.standard.publication + site.standard.document creates. Runs in a
+ *    Durable Object for real-time publisher + document updates between cron runs.
  */
 
-import { AtpAgent } from "@atproto/api";
+import { resolvePds } from "./pds-resolver.js";
+import { listReposByCollection } from "./lightrail.js";
+import { friendlyFetch } from "./fetch-helper.js";
 
-const agent = new AtpAgent({ service: "https://public.api.bsky.app" });
 const PUBLICATION_COLLECTION = "site.standard.publication";
 
 /**
- * Check whether a DID has at least one site.standard.publication record.
- * Used to filter out brid.gy bridged accounts that have documents but no
- * actual Standard.site publication.
+ * Query a specific PDS for records in a given collection using com.atproto.repo.listRecords.
  *
- * Returns:
- *   true  — definitively has a publication
- *   false — definitively has none
- *   null  — lookup failed (transient error, treat as "unknown — skip for now")
+ * @param pds - Base URL of the PDS (e.g., `https://pds.example.com`)
+ * @param did - Repository DID to query (the `repo` parameter)
+ * @param collection - Collection name to list (the `collection` parameter)
+ * @param limit - Maximum number of records to return (default: 100)
+ * @param cursor - Optional pagination cursor
+ * @returns The parsed response `{ records: [{ uri, cid, value }...], cursor? }`, or `null` when the HTTP response is not OK
+ *
+ * Note: network or JSON parsing errors are not caught here and will propagate to the caller.
+ */
+async function listRecordsFromPds<T = unknown>(
+  pds: string,
+  did: string,
+  collection: string,
+  limit = 100,
+  cursor?: string,
+): Promise<{ records: Array<{ uri: string; cid: string; value: T }>; cursor?: string } | null> {
+  const url = new URL(`${pds}/xrpc/com.atproto.repo.listRecords`);
+  url.searchParams.set("repo", did);
+  url.searchParams.set("collection", collection);
+  url.searchParams.set("limit", String(limit));
+  if (cursor) url.searchParams.set("cursor", cursor);
+
+  const res = await friendlyFetch(url.toString());
+  if (!res.ok) return null;
+  return (await res.json()) as {
+    records: Array<{ uri: string; cid: string; value: T }>;
+    cursor?: string;
+  };
+}
+
+export { listRecordsFromPds };
+
+/**
+ * Determine whether a DID has at least one site.standard.publication record.
+ *
+ * @returns `true` if at least one publication record exists for the DID, `false` if the PDS was reachable and no records were found, `null` if the lookup failed or the DID's PDS could not be resolved.
  */
 export async function hasValidPublication(
   did: string,
 ): Promise<boolean | null> {
+  const pds = await resolvePds(did);
+  if (!pds) return null;
+
   try {
-    const res = await agent.com.atproto.repo.listRecords({
-      repo: did,
-      collection: PUBLICATION_COLLECTION,
-      limit: 1,
-    });
-    return res.data.records.length > 0;
+    const body = await listRecordsFromPds(pds, did, PUBLICATION_COLLECTION, 1);
+    if (body === null) return null;
+    return body.records.length > 0;
   } catch (err) {
     console.error(`hasValidPublication lookup failed for ${did}:`, err);
     return null;
@@ -53,7 +86,7 @@ export async function hasValidPublication(
  * Find these from:
  *   - https://standard.site/docs/implementations/
  *   - The Standard.site community
- *   - pdsls.dev searches for site.standard.document
+ *   - pdsls.dev searches for site.standard.publication
  */
 const SEED_PUBLISHERS: Array<{ did: string; label: string }> = [
   // Add known publisher DIDs here, e.g.:
@@ -86,8 +119,43 @@ export async function seedPublishers(db: D1Database): Promise<number> {
 }
 
 /**
- * Discover publishers from users' social graphs.
- * Checks if authors of liked posts also publish documents.
+ * Discover publisher DIDs indexed by lightrail that have at least one site.standard.publication record.
+ *
+ * @returns The number of publisher DIDs that were newly inserted into the `publishers` table during this run
+ */
+export async function discoverViaLightrail(db: D1Database): Promise<number> {
+  let discovered = 0;
+
+  try {
+    for await (const did of listReposByCollection(PUBLICATION_COLLECTION)) {
+      // Per-iteration try/catch: a single failed insert must not abort the
+      // whole lightrail stream. Keep the outer try around the iterator only.
+      try {
+        const result = await db
+          .prepare(
+            `INSERT OR IGNORE INTO publishers (did, label) VALUES (?, ?)`,
+          )
+          .bind(did, "auto:lightrail")
+          .run();
+        if ((result.meta.changes ?? 0) > 0) discovered++;
+      } catch (insertErr) {
+        console.error(`discoverViaLightrail insert failed for ${did}:`, insertErr);
+        continue;
+      }
+    }
+  } catch (err) {
+    console.error("discoverViaLightrail stream failed:", err);
+  }
+
+  return discovered;
+}
+
+/**
+ * Discover publisher DIDs by inspecting authors of liked posts and verifying they publish a site.standard.publication.
+ *
+ * Queries up to 50 candidate DIDs derived from the `likes` table, verifies each candidate with `hasValidPublication`, and inserts verified DIDs into `publishers` with the label `auto:social-graph`.
+ *
+ * @returns The number of DIDs inserted into `publishers` during this run
  */
 export async function discoverFromSocialGraph(
   db: D1Database,

@@ -53,13 +53,9 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
 
     console.log(`User ${did}: ${likeResult.stored} likes synced`);
 
-    // Discover publishers from this user's liked post authors
-    await step.do(`discover-from-user-${did}`, async () => {
-      const { discoverFromSocialGraph } = await import("./sync/discover.js");
-      return await discoverFromSocialGraph(this.env.DB);
-    });
-
-    // Sync documents from any newly discovered publishers
+    // Sync documents from all publishers. syncAllDocuments internally runs
+    // lightrail + social-graph discovery to pick up any new ones before
+    // fetching the latest docs.
     await step.do(`sync-docs-for-user-${did}`, async () => {
       const result = await syncAllDocuments(this.env.DB);
       return { stored: result.stored, discovered: result.discovered };
