@@ -16,6 +16,7 @@ import { AtpAgent } from "@atproto/api";
 // doesn't include rpc:app.bsky.actor.getProfile.
 const publicAgent = new AtpAgent({ service: "https://public.api.bsky.app" });
 import { listUsers } from "../sync/users.js";
+import { VOYAGE_API, VOYAGE_MODEL, EMBEDDING_DIMENSIONS } from "../recommend/embed.js";
 import { enrollPage } from "./enroll-page.js";
 import { recsPage } from "./recs-page.js";
 import { recsLookupPage } from "./recs-lookup-page.js";
@@ -324,32 +325,41 @@ api.post("/admin/add-publisher", async (c) => {
   return c.json({ added: true, did: body.did });
 });
 
-// Test Voyage API + Vectorize with a single embedding
+// Test Voyage API + Vectorize with a single embedding.
+// Gated by VOYAGE_API_KEY in the Authorization header to prevent
+// unauthenticated callers from triggering billable API calls.
 api.get("/admin/test-embed", async (c) => {
+  const token = c.req.header("Authorization")?.replace("Bearer ", "");
+  if (!token || token !== c.env.VOYAGE_API_KEY) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  let currentStep = "voyage-fetch";
   try {
-    const res = await fetch("https://api.voyageai.com/v1/embeddings", {
+    const res = await fetch(VOYAGE_API, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${c.env.VOYAGE_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "voyage-3.5-lite",
+        model: VOYAGE_MODEL,
         input: ["Hello world test embedding"],
         input_type: "query",
-        output_dimension: 1024,
+        output_dimension: EMBEDDING_DIMENSIONS,
       }),
     });
 
     if (!res.ok) {
       const body = await res.text();
-      return c.json({ step: "voyage", ok: false, status: res.status, body }, 502);
+      return c.json({ step: "voyage-fetch", ok: false, status: res.status, body }, 502);
     }
 
+    currentStep = "voyage-parse";
     const data = await res.json() as { data: Array<{ embedding: number[] }> };
     const vector = data.data[0].embedding;
 
-    // Try upserting to Vectorize
+    currentStep = "vector-upsert";
     await c.env.VECTORS.upsert([{
       id: "test-embed-probe",
       values: vector,
@@ -357,7 +367,7 @@ api.get("/admin/test-embed", async (c) => {
       metadata: { type: "test" },
     }]);
 
-    // Clean up
+    currentStep = "vector-cleanup";
     await c.env.VECTORS.deleteByIds(["test-embed-probe"]);
 
     return c.json({
@@ -368,7 +378,7 @@ api.get("/admin/test-embed", async (c) => {
     });
   } catch (err) {
     return c.json({
-      step: "unknown",
+      step: currentStep,
       ok: false,
       error: err instanceof Error ? err.message : String(err),
     }, 500);

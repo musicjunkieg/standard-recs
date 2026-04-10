@@ -12,9 +12,9 @@
  * Free tier: 200M tokens — covers this project for months.
  */
 
-const VOYAGE_API = "https://api.voyageai.com/v1/embeddings";
-const VOYAGE_MODEL = "voyage-3.5-lite";
-const EMBEDDING_DIMENSIONS = 1024;
+export const VOYAGE_API = "https://api.voyageai.com/v1/embeddings";
+export const VOYAGE_MODEL = "voyage-3.5-lite";
+export const EMBEDDING_DIMENSIONS = 1024;
 const BATCH_SIZE = 100;
 
 type EmbedResult = {
