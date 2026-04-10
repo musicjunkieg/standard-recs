@@ -3,13 +3,8 @@
  * Publisher discovery is handled by discover.ts.
  */
 
-import {
-  seedPublishers,
-  discoverFromSocialGraph,
-  discoverViaLightrail,
-  listRecordsFromPds,
-} from "./discover.js";
-import { resolvePds } from "./pds-resolver.js";
+import { listRecordsFromPds } from "./pds-fetch.js";
+import { resolvePdsCached, isBridgedPds } from "./pds-resolver.js";
 
 const COLLECTION = "site.standard.document";
 
@@ -21,73 +16,150 @@ export type DocSyncResult = {
 };
 
 /**
- * Synchronizes `site.standard.document` records from discovered publishers into the local `documents` table and returns aggregated counters.
+ * Sync documents for a single batch of publishers.
  *
- * Performs publisher seeding and discovery, fetches records from each publisher's repository, upserts documents into the database, and accumulates totals.
+ * Selects the `limit` least-recently-synced publishers, iterates them
+ * sequentially, and stamps `last_synced_at` after each one (success or
+ * failure). Designed to fit within a single Worker invocation's subrequest
+ * budget — the caller is expected to invoke this function repeatedly
+ * (one invocation per Workflow step) until `processed` comes back 0.
  *
- * @returns An object with counters:
- *  - `discovered`: the number of new publishers discovered,
- *  - `fetched`: the total number of records fetched from publishers,
- *  - `stored`: the total number of documents successfully upserted,
- *  - `errors`: the total number of errors encountered during the run
+ * @returns processed: number of publisher rows selected this call
+ *          (0 means there's nothing left to sync)
  */
-export async function syncAllDocuments(db: D1Database): Promise<DocSyncResult> {
-  await seedPublishers(db);
+export async function syncDocumentsBatch(
+  db: D1Database,
+  vectors: VectorizeIndex,
+  limit: number,
+): Promise<{
+  processed: number;
+  fetched: number;
+  stored: number;
+  errors: number;
+  bridged: number;
+}> {
+  let processed = 0;
+  let fetched = 0;
+  let stored = 0;
+  let errors = 0;
+  let bridged = 0;
 
-  // Defensive wrappers so a discovery failure never aborts the whole
-  // syncAllDocuments run. discoverViaLightrail already catches internally,
-  // but discoverFromSocialGraph does not — keep the pattern uniform and
-  // surface any failure in totalErrors so the caller can see it.
-  let discoveryErrors = 0;
+  // Claim one publisher at a time via UPDATE ... RETURNING. The subquery
+  // inside the UPDATE sees the state after any concurrent UPDATE commits,
+  // and D1 serializes writes, so two workflows running this loop in parallel
+  // can't claim the same row. This replaces a SELECT LIMIT N + loop pattern
+  // which was race-prone across concurrent workflow instances.
+  //
+  // Side effect: last_synced_at is stamped BEFORE processing, not after.
+  // If sync crashes mid-publisher, the row won't retry until the next 23h
+  // window. That tradeoff is acceptable — we'd rather waste one publisher
+  // per crash than do duplicate work across every concurrent workflow run.
+  for (let i = 0; i < limit; i++) {
+    const claimed = await db
+      .prepare(
+        `UPDATE publishers
+            SET last_synced_at = datetime('now')
+          WHERE did = (
+            SELECT did FROM publishers
+             WHERE last_synced_at IS NULL
+                OR last_synced_at < datetime('now', '-23 hours')
+             ORDER BY last_synced_at ASC NULLS FIRST
+             LIMIT 1
+          )
+          RETURNING did, label`,
+      )
+      .first<{ did: string; label: string | null }>();
 
-  console.log("  Discovering publishers via lightrail...");
-  let fromLightrail = 0;
-  try {
-    fromLightrail = await discoverViaLightrail(db);
-  } catch (err) {
-    discoveryErrors++;
-    console.error("  discoverViaLightrail threw:", err);
-  }
-  console.log(`    ${fromLightrail} new publishers from lightrail`);
+    if (!claimed) break; // nothing left to sync
 
-  console.log("  Discovering publishers from social graph...");
-  let fromSocialGraph = 0;
-  try {
-    fromSocialGraph = await discoverFromSocialGraph(db);
-  } catch (err) {
-    discoveryErrors++;
-    console.error("  discoverFromSocialGraph threw:", err);
-  }
-  console.log(`    ${fromSocialGraph} new publishers from social graph`);
+    processed++;
 
-  const discovered = fromLightrail + fromSocialGraph;
-
-  const { results: publishers } = await db
-    .prepare(`SELECT did, label FROM publishers`)
-    .all<{ did: string; label: string | null }>();
-
-  console.log(`  Fetching documents from ${publishers.length} publishers...`);
-
-  let totalFetched = 0;
-  let totalStored = 0;
-  let totalErrors = discoveryErrors;
-
-  for (const pub of publishers) {
     try {
-      const result = await syncDocumentsFromRepo(db, pub.did);
-      totalFetched += result.fetched;
-      totalStored += result.stored;
-      totalErrors += result.errors;
+      const result = await syncDocumentsFromRepo(db, vectors, claimed.did);
+      fetched += result.fetched;
+      stored += result.stored;
+      errors += result.errors;
+      if (result.bridged) bridged++;
       if (result.stored > 0) {
-        console.log(`    ${pub.label ?? pub.did}: ${result.stored} docs`);
+        console.log(`    ${claimed.label ?? claimed.did}: ${result.stored} docs`);
       }
     } catch (err) {
-      totalErrors++;
-      console.error(`    Failed: ${pub.did}`, err);
+      errors++;
+      console.error(`    Failed: ${claimed.did}`, err);
     }
   }
 
-  return { discovered, fetched: totalFetched, stored: totalStored, errors: totalErrors };
+  if (processed === 0) {
+    return { processed: 0, fetched: 0, stored: 0, errors: 0, bridged: 0 };
+  }
+
+  return { processed, fetched, stored, errors, bridged };
+}
+
+/**
+ * Delete a bridged publisher's documents, vectors, recommendations, and
+ * the publisher row itself. Called inline during sync whenever a publisher
+ * is detected to live on a bridged PDS (e.g., brid.gy).
+ *
+ * Returns true on full success, false if any Vectorize chunk deletion
+ * failed. On failure, the D1 rows are NOT deleted — losing them would
+ * drop the URI→vector mappings needed to ever clean up the orphaned
+ * vectors. The publisher's last_synced_at was stamped by the caller
+ * before this ran, so natural 23h retry will kick in on the next cron.
+ */
+async function cleanupBridgedPublisher(
+  db: D1Database,
+  vectors: VectorizeIndex,
+  did: string,
+): Promise<boolean> {
+  // Collect document URIs for vector deletion
+  const { results: docs } = await db
+    .prepare(`SELECT uri FROM documents WHERE did = ?`)
+    .bind(did)
+    .all<{ uri: string }>();
+
+  let vectorDeleteFailed = false;
+
+  if (docs.length > 0) {
+    const ids = docs.map((d) => d.uri);
+    // Chunk to stay under Vectorize batch limits (1000/batch is safe)
+    const CHUNK_SIZE = 500;
+    for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+      try {
+        await vectors.deleteByIds(ids.slice(i, i + CHUNK_SIZE));
+      } catch (err) {
+        console.error(
+          `  cleanupBridgedPublisher: vector delete failed for ${did}:`,
+          err,
+        );
+        vectorDeleteFailed = true;
+        break;
+      }
+    }
+  }
+
+  if (vectorDeleteFailed) {
+    // Abort D1 cleanup. Leaving the documents rows in place preserves the
+    // URI list needed to retry vector deletion on the next pass.
+    return false;
+  }
+
+  try {
+    await db.batch([
+      db
+        .prepare(
+          `DELETE FROM recommendations WHERE document_uri IN
+             (SELECT uri FROM documents WHERE did = ?)`,
+        )
+        .bind(did),
+      db.prepare(`DELETE FROM documents WHERE did = ?`).bind(did),
+      db.prepare(`DELETE FROM publishers WHERE did = ?`).bind(did),
+    ]);
+    return true;
+  } catch (err) {
+    console.error(`  cleanupBridgedPublisher: D1 cleanup failed for ${did}:`, err);
+    return false;
+  }
 }
 
 /**
@@ -105,12 +177,29 @@ export async function syncAllDocuments(db: D1Database): Promise<DocSyncResult> {
  */
 export async function syncDocumentsFromRepo(
   db: D1Database,
+  vectors: VectorizeIndex,
   did: string,
-): Promise<{ fetched: number; stored: number; errors: number }> {
-  const pds = await resolvePds(did);
+): Promise<{ fetched: number; stored: number; errors: number; bridged: boolean }> {
+  const pds = await resolvePdsCached(db, did);
   if (!pds) {
     console.error(`  syncDocumentsFromRepo: cannot resolve PDS for ${did}`);
-    return { fetched: 0, stored: 0, errors: 1 };
+    return { fetched: 0, stored: 0, errors: 1, bridged: false };
+  }
+
+  // Bridged PDSes (e.g., brid.gy) create site.standard.publication records
+  // for every bridged account, so the "has a publication" filter doesn't
+  // exclude them. Remove any existing content from this publisher and drop
+  // the publisher row so we never sync from them again.
+  if (isBridgedPds(pds)) {
+    console.log(`  skipping bridged publisher ${did} (${pds}) — cleaning up`);
+    const cleaned = await cleanupBridgedPublisher(db, vectors, did);
+    if (!cleaned) {
+      // Cleanup failed partway through (likely Vectorize). Don't mark as
+      // bridged — leave the publisher in place so the 23h retry window
+      // will attempt again. Surface as an error for visibility.
+      return { fetched: 0, stored: 0, errors: 1, bridged: false };
+    }
+    return { fetched: 0, stored: 0, errors: 0, bridged: true };
   }
 
   let cursor: string | undefined;
@@ -131,12 +220,12 @@ export async function syncDocumentsFromRepo(
     } catch (err) {
       // Network/JSON error — record and return partial progress.
       console.error(`  listRecordsFromPds threw for ${did}:`, err);
-      return { fetched, stored, errors: errors + 1 };
+      return { fetched, stored, errors: errors + 1, bridged: false };
     }
 
     if (body === null) {
       // PDS returned a non-2xx — surface as an error, keep partial totals
-      return { fetched, stored, errors: errors + 1 };
+      return { fetched, stored, errors: errors + 1, bridged: false };
     }
 
     const { records, cursor: nextCursor } = body;
@@ -170,7 +259,7 @@ export async function syncDocumentsFromRepo(
     await sleep(250);
   }
 
-  return { fetched, stored, errors };
+  return { fetched, stored, errors, bridged: false };
 }
 
 export type StandardDocument = {

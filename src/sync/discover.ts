@@ -18,44 +18,9 @@
 
 import { resolvePds } from "./pds-resolver.js";
 import { listReposByCollection } from "./lightrail.js";
-import { friendlyFetch } from "./fetch-helper.js";
+import { listRecordsFromPds } from "./pds-fetch.js";
 
 const PUBLICATION_COLLECTION = "site.standard.publication";
-
-/**
- * Query a specific PDS for records in a given collection using com.atproto.repo.listRecords.
- *
- * @param pds - Base URL of the PDS (e.g., `https://pds.example.com`)
- * @param did - Repository DID to query (the `repo` parameter)
- * @param collection - Collection name to list (the `collection` parameter)
- * @param limit - Maximum number of records to return (default: 100)
- * @param cursor - Optional pagination cursor
- * @returns The parsed response `{ records: [{ uri, cid, value }...], cursor? }`, or `null` when the HTTP response is not OK
- *
- * Note: network or JSON parsing errors are not caught here and will propagate to the caller.
- */
-async function listRecordsFromPds<T = unknown>(
-  pds: string,
-  did: string,
-  collection: string,
-  limit = 100,
-  cursor?: string,
-): Promise<{ records: Array<{ uri: string; cid: string; value: T }>; cursor?: string } | null> {
-  const url = new URL(`${pds}/xrpc/com.atproto.repo.listRecords`);
-  url.searchParams.set("repo", did);
-  url.searchParams.set("collection", collection);
-  url.searchParams.set("limit", String(limit));
-  if (cursor) url.searchParams.set("cursor", cursor);
-
-  const res = await friendlyFetch(url.toString());
-  if (!res.ok) return null;
-  return (await res.json()) as {
-    records: Array<{ uri: string; cid: string; value: T }>;
-    cursor?: string;
-  };
-}
-
-export { listRecordsFromPds };
 
 /**
  * Determine whether a DID has at least one site.standard.publication record.
@@ -198,100 +163,54 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// pruneInvalidPublishers used to walk every publisher and call
+// hasValidPublication on each to remove stale ones. That approach blew the
+// per-invocation subrequest limit (6500+ publishers × PDS resolve + listRecords
+// per publisher, all in one Workflow step). The cleanup job it performed is
+// now handled inline during syncDocumentsFromRepo: any publisher whose PDS
+// resolves to a bridged host gets its docs, vectors, and row deleted on the
+// spot. Dropped publications (legit publishers who deleted their publication)
+// are rare enough that we can address them with a dedicated admin endpoint
+// later if needed, rather than walking the full table every cron.
+
 /**
- * Walk all publishers and remove any that no longer have a valid
- * site.standard.publication record. Cascades deletion to documents,
- * recommendations referencing those documents, and vectors.
+ * Run publisher discovery (seed, lightrail, social graph) and return counts.
+ *
+ * Discovery does NOT fetch documents — it just populates the `publishers`
+ * table. Document fetching is handled by `syncDocumentsBatch` in documents.ts.
+ *
+ * Kept as its own Workflow step so its subrequest budget is separate
+ * from the sync batches.
  */
-export async function pruneInvalidPublishers(
+export async function runDiscovery(
   db: D1Database,
-  vectors: VectorizeIndex,
-): Promise<{ checked: number; removed: number; skipped: number }> {
-  const { results: publishers } = await db
-    .prepare(`SELECT did FROM publishers`)
-    .all<{ did: string }>();
+): Promise<{ discovered: number; errors: number }> {
+  await seedPublishers(db);
 
-  let removed = 0;
-  let skipped = 0;
+  let discoveryErrors = 0;
 
-  for (const pub of publishers) {
-    const valid = await hasValidPublication(pub.did);
-    // Only delete on a definitive false. null (lookup failed) → skip and
-    // retry on the next cron — never delete data on a transient error.
-    if (valid === true) {
-      await sleep(100);
-      continue;
-    }
-    if (valid === null) {
-      skipped++;
-      console.log(`    skipping ${pub.did}: publication lookup failed, will retry`);
-      await sleep(100);
-      continue;
-    }
-
-    // Collect document URIs so we can delete their vectors
-    const { results: docs } = await db
-      .prepare(`SELECT uri FROM documents WHERE did = ?`)
-      .bind(pub.did)
-      .all<{ uri: string }>();
-
-    // Delete vectors first. If any chunk fails after retry, skip this
-    // publisher entirely to avoid orphaning vectors with no D1 row.
-    if (docs.length > 0) {
-      const uris = docs.map((d) => d.uri);
-      const ok = await deleteVectorsChunked(vectors, uris);
-      if (!ok) {
-        skipped++;
-        console.error(
-          `    skipping ${pub.did}: vector delete failed, will retry next cron`,
-        );
-        await sleep(100);
-        continue;
-      }
-    }
-
-    await db.batch([
-      db
-        .prepare(
-          `DELETE FROM recommendations WHERE document_uri IN
-             (SELECT uri FROM documents WHERE did = ?)`,
-        )
-        .bind(pub.did),
-      db.prepare(`DELETE FROM documents WHERE did = ?`).bind(pub.did),
-      db.prepare(`DELETE FROM publishers WHERE did = ?`).bind(pub.did),
-    ]);
-
-    removed++;
-    console.log(`    pruned invalid publisher: ${pub.did} (${docs.length} docs)`);
-    await sleep(100);
+  console.log("  Discovering publishers via lightrail...");
+  let fromLightrail = 0;
+  try {
+    fromLightrail = await discoverViaLightrail(db);
+  } catch (err) {
+    discoveryErrors++;
+    console.error("  discoverViaLightrail threw:", err);
   }
+  console.log(`    ${fromLightrail} new publishers from lightrail`);
 
-  return { checked: publishers.length, removed, skipped };
-}
-
-/**
- * Delete vectors in chunks with one retry per chunk. Returns true on full
- * success, false if any chunk failed both attempts.
- */
-async function deleteVectorsChunked(
-  vectors: VectorizeIndex,
-  ids: string[],
-): Promise<boolean> {
-  const CHUNK_SIZE = 100;
-  for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
-    const chunk = ids.slice(i, i + CHUNK_SIZE);
-    try {
-      await vectors.deleteByIds(chunk);
-    } catch (err) {
-      console.warn(`    Vectorize delete chunk failed, retrying:`, err);
-      await sleep(500);
-      try {
-        await vectors.deleteByIds(chunk);
-      } catch (retryErr) {
-        console.error(`    Vectorize delete chunk failed after retry:`, retryErr);
-        return false;
-      }
-    }
+  console.log("  Discovering publishers from social graph...");
+  let fromSocialGraph = 0;
+  try {
+    fromSocialGraph = await discoverFromSocialGraph(db);
+  } catch (err) {
+    discoveryErrors++;
+    console.error("  discoverFromSocialGraph threw:", err);
   }
-  return true;
+  console.log(`    ${fromSocialGraph} new publishers from social graph`);
+
+  return {
+    discovered: fromLightrail + fromSocialGraph,
+    errors: discoveryErrors,
+  };
 }
