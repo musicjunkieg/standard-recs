@@ -148,7 +148,6 @@ export async function syncDocumentsFromRepo(
       fetched++;
       try {
         stmts.push(upsertDocumentStmt(db, record.uri, did, record.value));
-        stored++;
       } catch (err) {
         errors++;
         console.error(`Failed to parse document ${record.uri}:`, err);
@@ -156,7 +155,11 @@ export async function syncDocumentsFromRepo(
     }
 
     if (stmts.length > 0) {
-      try { await db.batch(stmts); } catch (err) {
+      try {
+        await db.batch(stmts);
+        // Only increment stored after the batch actually persisted
+        stored += stmts.length;
+      } catch (err) {
         errors += stmts.length;
         console.error(`Batch insert failed for ${did}:`, err);
       }
