@@ -203,9 +203,14 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
         },
       );
 
-      console.log(
-        `  batch ${scope}-${i}: processed=${result.processed} stored=${result.stored} bridged=${result.bridged} errors=${result.errors}`,
-      );
+      // Only log when something interesting happened (non-zero stored,
+      // bridged, or errors). The sync loop can run hundreds of batches and
+      // each log line eats into the 256KB per-invocation log budget.
+      if (result.stored > 0 || result.bridged > 0 || result.errors > 0) {
+        console.log(
+          `  batch ${scope}-${i}: processed=${result.processed} stored=${result.stored} bridged=${result.bridged} errors=${result.errors}`,
+        );
+      }
 
       // A short batch means syncDocumentsBatch couldn't claim `batchSize`
       // publishers — there's nothing left to do. Break immediately instead

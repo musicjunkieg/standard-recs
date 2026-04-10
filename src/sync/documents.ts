@@ -55,7 +55,9 @@ export async function syncDocumentsBatch(
   // window. That tradeoff is acceptable — we'd rather waste one publisher
   // per crash than do duplicate work across every concurrent workflow run.
   for (let i = 0; i < limit; i++) {
-    const claimed = await db
+    // D1's .first() may not reliably return rows from UPDATE RETURNING.
+    // Use .all() and take the first result instead.
+    const { results: claimedRows } = await db
       .prepare(
         `UPDATE publishers
             SET last_synced_at = datetime('now')
@@ -68,7 +70,8 @@ export async function syncDocumentsBatch(
           )
           RETURNING did, label`,
       )
-      .first<{ did: string; label: string | null }>();
+      .all<{ did: string; label: string | null }>();
+    const claimed = claimedRows[0] ?? null;
 
     if (!claimed) break; // nothing left to sync
 
