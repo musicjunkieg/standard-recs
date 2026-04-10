@@ -421,6 +421,7 @@ api.post("/admin/debug-embed", async (c) => {
   }
 
   const results: Array<{ step: string; ok: boolean; detail: unknown }> = [];
+  const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   // Test with real likes
   {
@@ -453,7 +454,7 @@ api.post("/admin/debug-embed", async (c) => {
           } else {
             currentStep = "likes-upsert";
             const embeddings = validation.embeddings;
-            const probeIds = likes.map((l) => `debug-${l.uri}`);
+            const probeIds = likes.map((l) => `debug-${nonce}-${l.uri}`);
             const vectors: VectorizeVector[] = embeddings.map((emb, i) => ({
               id: probeIds[i],
               values: emb,
@@ -508,7 +509,7 @@ api.post("/admin/debug-embed", async (c) => {
           } else {
             currentStep = "docs-upsert";
             const embeddings = validation.embeddings;
-            const probeIds = docs.map((d) => `debug-${d.uri}`);
+            const probeIds = docs.map((d) => `debug-${nonce}-${d.uri}`);
             const vectors: VectorizeVector[] = embeddings.map((emb, i) => ({
               id: probeIds[i],
               values: emb,
