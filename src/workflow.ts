@@ -26,14 +26,14 @@ export type SyncParams =
   | { mode: "full" }
   | { mode: "user"; did: string };
 
-/** Publishers per sync-documents Workflow step.
- *  Keep low enough that resolve+listRecords stays under the per-invocation
- *  subrequest budget even for publishers with many pages of documents. */
-const SYNC_DOCS_BATCH_SIZE = 50;
+/** Defaults for batch sizing when env vars are missing or invalid. */
+const DEFAULT_SYNC_DOCS_BATCH_SIZE = 50;
+const DEFAULT_SYNC_DOCS_MAX_BATCHES = 300;
 
-/** Hard cap on batched sync-documents steps per workflow run, to protect
- *  against runaway loops if syncDocumentsBatch ever fails to mark progress. */
-const SYNC_DOCS_MAX_BATCHES = 300;
+function parseIntOrDefault(value: string | undefined, fallback: number): number {
+  const parsed = parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
   async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep) {
@@ -157,20 +157,29 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
   /**
    * Loop `syncDocumentsBatch` across many Workflow steps until no more
    * publishers need syncing. Each step has its own subrequest budget.
-   * Stops at SYNC_DOCS_MAX_BATCHES as a safety cap.
+   * Stops at SYNC_DOCS_MAX_BATCHES (from env) as a safety cap.
    */
   private async runBatchedDocumentSync(
     step: WorkflowStep,
     scope: string,
   ): Promise<void> {
-    for (let i = 0; i < SYNC_DOCS_MAX_BATCHES; i++) {
+    const batchSize = parseIntOrDefault(
+      this.env.SYNC_DOCS_BATCH_SIZE,
+      DEFAULT_SYNC_DOCS_BATCH_SIZE,
+    );
+    const maxBatches = parseIntOrDefault(
+      this.env.SYNC_DOCS_MAX_BATCHES,
+      DEFAULT_SYNC_DOCS_MAX_BATCHES,
+    );
+
+    for (let i = 0; i < maxBatches; i++) {
       const result = await step.do(
         `sync-documents-batch-${scope}-${i}`,
         async () => {
           return await syncDocumentsBatch(
             this.env.DB,
             this.env.VECTORS,
-            SYNC_DOCS_BATCH_SIZE,
+            batchSize,
           );
         },
       );

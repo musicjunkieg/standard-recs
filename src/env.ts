@@ -18,6 +18,8 @@ export type Env = {
 
   // Config vars
   SYNC_BATCH_SIZE: string;
+  SYNC_DOCS_BATCH_SIZE: string;
+  SYNC_DOCS_MAX_BATCHES: string;
   WINDOW_DAYS: string;
   TOP_N: string;
   WORKER_URL: string;

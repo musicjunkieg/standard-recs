@@ -97,71 +97,62 @@ export async function syncDocumentsBatch(
   errors: number;
   bridged: number;
 }> {
-  // Take publishers that have never been synced OR were synced more than
-  // 23 hours ago. The 23h window lets us re-sync daily via the cron while
-  // keeping the loop converging toward "done" inside a single run.
-  const { results: publishers } = await db
-    .prepare(
-      `SELECT did, label FROM publishers
-        WHERE last_synced_at IS NULL
-           OR last_synced_at < datetime('now', '-23 hours')
-        ORDER BY last_synced_at ASC NULLS FIRST
-        LIMIT ?`,
-    )
-    .bind(limit)
-    .all<{ did: string; label: string | null }>();
-
-  if (publishers.length === 0) {
-    return { processed: 0, fetched: 0, stored: 0, errors: 0, bridged: 0 };
-  }
-
+  let processed = 0;
   let fetched = 0;
   let stored = 0;
   let errors = 0;
   let bridged = 0;
 
-  for (const pub of publishers) {
-    let result:
-      | Awaited<ReturnType<typeof syncDocumentsFromRepo>>
-      | null = null;
+  // Claim one publisher at a time via UPDATE ... RETURNING. The subquery
+  // inside the UPDATE sees the state after any concurrent UPDATE commits,
+  // and D1 serializes writes, so two workflows running this loop in parallel
+  // can't claim the same row. This replaces a SELECT LIMIT N + loop pattern
+  // which was race-prone across concurrent workflow instances.
+  //
+  // Side effect: last_synced_at is stamped BEFORE processing, not after.
+  // If sync crashes mid-publisher, the row won't retry until the next 23h
+  // window. That tradeoff is acceptable — we'd rather waste one publisher
+  // per crash than do duplicate work across every concurrent workflow run.
+  for (let i = 0; i < limit; i++) {
+    const claimed = await db
+      .prepare(
+        `UPDATE publishers
+            SET last_synced_at = datetime('now')
+          WHERE did = (
+            SELECT did FROM publishers
+             WHERE last_synced_at IS NULL
+                OR last_synced_at < datetime('now', '-23 hours')
+             ORDER BY last_synced_at ASC NULLS FIRST
+             LIMIT 1
+          )
+          RETURNING did, label`,
+      )
+      .first<{ did: string; label: string | null }>();
+
+    if (!claimed) break; // nothing left to sync
+
+    processed++;
+
     try {
-      result = await syncDocumentsFromRepo(db, vectors, pub.did);
+      const result = await syncDocumentsFromRepo(db, vectors, claimed.did);
       fetched += result.fetched;
       stored += result.stored;
       errors += result.errors;
       if (result.bridged) bridged++;
       if (result.stored > 0) {
-        console.log(`    ${pub.label ?? pub.did}: ${result.stored} docs`);
+        console.log(`    ${claimed.label ?? claimed.did}: ${result.stored} docs`);
       }
     } catch (err) {
       errors++;
-      console.error(`    Failed: ${pub.did}`, err);
-    }
-
-    // Stamp the publisher as synced unless it was a bridged cleanup (in
-    // which case the row has already been deleted). Stamping always
-    // prevents a single bad publisher from blocking the queue.
-    if (!result?.bridged) {
-      try {
-        await db
-          .prepare(
-            `UPDATE publishers SET last_synced_at = datetime('now') WHERE did = ?`,
-          )
-          .bind(pub.did)
-          .run();
-      } catch (err) {
-        console.error(`    Failed to stamp last_synced_at for ${pub.did}:`, err);
-      }
+      console.error(`    Failed: ${claimed.did}`, err);
     }
   }
 
-  return {
-    processed: publishers.length,
-    fetched,
-    stored,
-    errors,
-    bridged,
-  };
+  if (processed === 0) {
+    return { processed: 0, fetched: 0, stored: 0, errors: 0, bridged: 0 };
+  }
+
+  return { processed, fetched, stored, errors, bridged };
 }
 
 /**

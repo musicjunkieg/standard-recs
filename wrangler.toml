@@ -58,6 +58,8 @@ new_classes = ["JetstreamListener"]
 
 [vars]
 SYNC_BATCH_SIZE = "50"
+SYNC_DOCS_BATCH_SIZE = "50"
+SYNC_DOCS_MAX_BATCHES = "300"
 WINDOW_DAYS = "30"
 TOP_N = "10"
 WORKER_URL = "https://standard-recs.bryan-78d.workers.dev"
