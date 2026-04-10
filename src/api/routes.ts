@@ -147,7 +147,8 @@ api.get("/recs/:did", async (c) => {
             r.path as string | null,
           ),
           site: (r.publication_name as string | null)
-            ?? (r.publication_url as string | null)?.replace(/^https?:\/\//, "").replace(/\/$/, "")
+            ?? extractHostname(r.publication_url as string | null)
+            ?? extractHostname(r.site as string | null)
             ?? null,
         })),
       }),
@@ -167,7 +168,10 @@ api.get("/recs/:did", async (c) => {
         r.site as string | null,
         r.path as string | null,
       ),
-      publication: r.publication_name ?? r.publication_url ?? null,
+      publication: r.publication_name
+        ?? extractHostname(r.publication_url as string | null)
+        ?? extractHostname(r.site as string | null)
+        ?? null,
       tags: r.tags ? JSON.parse(r.tags as string) : [],
       published_at: r.published_at,
       generated_at: r.generated_at,
@@ -610,6 +614,18 @@ function validateVoyageResponse(
  * @param site - The document's site field (may be an at:// URI or an https URL)
  * @param path - The document's path within the publication
  */
+/** Extract hostname from an HTTP(S) URL, or return null for non-URLs (at:// etc). */
+function extractHostname(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "https:" || parsed.protocol === "http:") {
+      return parsed.hostname;
+    }
+  } catch { /* not a valid URL */ }
+  return null;
+}
+
 function buildDocumentUrl(
   publicationUrl: string | null,
   site: string | null,
