@@ -360,15 +360,16 @@ api.get("/admin/test-embed", async (c) => {
     const vector = data.data[0].embedding;
 
     currentStep = "vector-upsert";
+    const probeId = `test-embed-probe-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await c.env.VECTORS.upsert([{
-      id: "test-embed-probe",
+      id: probeId,
       values: vector,
       namespace: "likes",
       metadata: { type: "test" },
     }]);
 
     currentStep = "vector-cleanup";
-    await c.env.VECTORS.deleteByIds(["test-embed-probe"]);
+    await c.env.VECTORS.deleteByIds([probeId]);
 
     return c.json({
       step: "all",
