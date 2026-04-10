@@ -336,19 +336,28 @@ api.get("/admin/test-embed", async (c) => {
 
   let currentStep = "voyage-fetch";
   try {
-    const res = await fetch(VOYAGE_API, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${c.env.VOYAGE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: VOYAGE_MODEL,
-        input: ["Hello world test embedding"],
-        input_type: "query",
-        output_dimension: EMBEDDING_DIMENSIONS,
-      }),
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+
+    let res: Response;
+    try {
+      res = await fetch(VOYAGE_API, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${c.env.VOYAGE_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: VOYAGE_MODEL,
+          input: ["Hello world test embedding"],
+          input_type: "query",
+          output_dimension: EMBEDDING_DIMENSIONS,
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
 
     if (!res.ok) {
       const body = await res.text();
@@ -356,8 +365,21 @@ api.get("/admin/test-embed", async (c) => {
     }
 
     currentStep = "voyage-parse";
-    const data = await res.json() as { data: Array<{ embedding: number[] }> };
-    const vector = data.data[0].embedding;
+    const data = await res.json() as Record<string, unknown>;
+    if (
+      !data ||
+      !Array.isArray(data.data) ||
+      data.data.length === 0 ||
+      !Array.isArray((data.data as Record<string, unknown>[])[0]?.embedding)
+    ) {
+      return c.json({
+        step: "voyage-parse",
+        ok: false,
+        error: "Unexpected Voyage response shape",
+        receivedKeys: data ? Object.keys(data) : null,
+      }, 422);
+    }
+    const vector = (data.data as Array<{ embedding: number[] }>)[0].embedding;
 
     currentStep = "vector-upsert";
     const probeId = `test-embed-probe-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -378,11 +400,14 @@ api.get("/admin/test-embed", async (c) => {
       vectorDimensions: vector.length,
     });
   } catch (err) {
+    const isTimeout = err instanceof DOMException && err.name === "AbortError";
     return c.json({
       step: currentStep,
       ok: false,
-      error: err instanceof Error ? err.message : String(err),
-    }, 500);
+      error: isTimeout
+        ? "Voyage API request timed out after 10s"
+        : err instanceof Error ? err.message : String(err),
+    }, isTimeout ? 504 : 500);
   }
 });
 
