@@ -20,7 +20,7 @@ import type { Env } from "./env.js";
 import { syncUserLikes, syncAllLikes, pruneStaleLikes } from "./sync/likes.js";
 import { syncDocumentsBatch } from "./sync/documents.js";
 import { runDiscovery } from "./sync/discover.js";
-import { embedAll } from "./recommend/embed.js";
+import { embedAll, parseEmbedMode } from "./recommend/embed.js";
 import { generateAllRecommendations, generateUserRecommendations } from "./recommend/index.js";
 
 export type SyncParams =
@@ -84,7 +84,13 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       );
     } else if (this.env.VOYAGE_API_KEY) {
       await step.do(`embed-for-user-${did}`, async () => {
-        const result = await embedAll(this.env.DB, this.env.VECTORS, this.env.VOYAGE_API_KEY);
+        const embedMode = parseEmbedMode(this.env.LIKE_EMBED_MODE);
+        const result = await embedAll(
+          this.env.DB,
+          this.env.VECTORS,
+          this.env.VOYAGE_API_KEY,
+          embedMode,
+        );
         return { likes: result.likes, documents: result.documents };
       });
 
@@ -148,7 +154,13 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       );
     } else if (this.env.VOYAGE_API_KEY) {
       const embedResult = await step.do("embed", async () => {
-        const result = await embedAll(this.env.DB, this.env.VECTORS, this.env.VOYAGE_API_KEY);
+        const embedMode = parseEmbedMode(this.env.LIKE_EMBED_MODE);
+        const result = await embedAll(
+          this.env.DB,
+          this.env.VECTORS,
+          this.env.VOYAGE_API_KEY,
+          embedMode,
+        );
         return { likes: result.likes, documents: result.documents, errors: result.errors };
       });
 
