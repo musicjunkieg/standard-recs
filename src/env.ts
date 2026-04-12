@@ -23,4 +23,6 @@ export type Env = {
   WINDOW_DAYS: string;
   TOP_N: string;
   WORKER_URL: string;
+  LIKE_EMBED_MODE: string;        // "query" | "document" | "both"
+  LIKE_QUERY_NAMESPACE: string;   // "likes" | "likes_doc"
 };
