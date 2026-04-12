@@ -331,29 +331,6 @@ export function recsPage(data: RecsPageData): string {
       border-bottom-color: var(--ink-soft);
     }
 
-    .nav {
-      margin-top: 3rem;
-      font-family: 'Inter', sans-serif;
-      font-size: 0.85rem;
-      color: var(--ink-muted);
-      text-align: center;
-      opacity: 0;
-      animation: rise 0.9s 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
-    }
-
-    .nav a {
-      color: var(--ink-soft);
-      text-decoration: none;
-      border-bottom: 1px solid rgba(107, 99, 93, 0.3);
-      transition: color 0.15s ease, border-color 0.15s ease;
-    }
-    .nav a:hover {
-      color: var(--ink);
-      border-bottom-color: var(--ink-soft);
-    }
-
-    .nav .sep { color: rgba(107, 99, 93, 0.35); margin: 0 0.5rem; }
-
     footer {
       position: relative;
       z-index: 10;
@@ -392,7 +369,7 @@ export function recsPage(data: RecsPageData): string {
         animation-iteration-count: 1 !important;
       }
       .blob { opacity: 0.42 !important; }
-      header.hero, .grid, .empty-card, .nav, footer { opacity: 1 !important; }
+      header.hero, .grid, .empty-card, footer { opacity: 1 !important; }
     }
 
     @media (max-width: 640px) {
@@ -428,10 +405,7 @@ export function recsPage(data: RecsPageData): string {
 </body>
 </html>`;
 
-  const nav = `
-    <div class="nav">
-      <a href="/recs">Look up another user</a><span class="sep">&middot;</span><a href="/">Enroll</a>
-    </div>
+  const close = `
   </main>${footer}`;
 
   if (data.state === "not_found") {
@@ -442,7 +416,7 @@ export function recsPage(data: RecsPageData): string {
     </header>
     <div class="empty-card">
       <p>Want recommendations of your own? <a href="/">Sign up with your Bluesky handle</a>.</p>
-    </div>${nav}`;
+    </div>${close}`;
   }
 
   const { handle, recs } = data;
@@ -456,7 +430,7 @@ export function recsPage(data: RecsPageData): string {
     <div class="empty-card">
       <p>We're syncing your likes — check back shortly.</p>
       <p>This page refreshes automatically.</p>
-    </div>${nav}`;
+    </div>${close}`;
   }
 
   const cards = recs
@@ -486,7 +460,7 @@ export function recsPage(data: RecsPageData): string {
     </header>
     <div class="grid">
 ${cards}
-    </div>${nav}`;
+    </div>${close}`;
 }
 
 function esc(s: string): string {
