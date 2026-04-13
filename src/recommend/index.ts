@@ -9,6 +9,11 @@
  */
 
 import { vectorIds } from "./vector-id.js";
+import {
+  LIKES_NAMESPACE_QUERY,
+  LIKES_NAMESPACE_DOC,
+  LIKES_DOC_ID_PREFIX,
+} from "./embed.js";
 
 type Recommendation = {
   did: string;
@@ -23,6 +28,7 @@ export async function generateAllRecommendations(
   db: D1Database,
   vectors: VectorizeIndex,
   topN: number,
+  likesNamespace: string = LIKES_NAMESPACE_QUERY,
 ): Promise<number> {
   const { results: users } = await db
     .prepare(`SELECT did FROM users`)
@@ -37,6 +43,7 @@ export async function generateAllRecommendations(
         vectors,
         user.did,
         topN,
+        likesNamespace,
       );
       totalRecs += recs.length;
     } catch (err) {
@@ -55,6 +62,8 @@ export async function generateUserRecommendations(
   vectors: VectorizeIndex,
   did: string,
   topN: number,
+  likesNamespace: string = LIKES_NAMESPACE_QUERY,
+  dryRun: boolean = false,
 ): Promise<Recommendation[]> {
   // 1. Get this user's like URIs from D1 (ordered by recency)
   const { results: likes } = await db
@@ -72,9 +81,13 @@ export async function generateUserRecommendations(
     return [];
   }
 
+  const idPrefix =
+    likesNamespace === LIKES_NAMESPACE_DOC ? LIKES_DOC_ID_PREFIX : "";
+
   // 2. Fetch their like vectors from Vectorize (IDs are hashed).
   // getByIds has a max of 20 IDs per call, so chunk the requests.
-  const likeHashes = await vectorIds(likes.map((l) => l.uri));
+  const baseHashes = await vectorIds(likes.map((l) => l.uri));
+  const likeHashes = baseHashes.map((h) => idPrefix + h);
   const likeVectors: VectorizeVector[] = [];
   for (let i = 0; i < likeHashes.length; i += 20) {
     const batch = await vectors.getByIds(likeHashes.slice(i, i + 20));
@@ -124,7 +137,7 @@ export async function generateUserRecommendations(
       score: match.score,
     }));
 
-  if (recs.length > 0) {
+  if (recs.length > 0 && !dryRun) {
     // Clear old recs and insert new ones
     const stmts: D1PreparedStatement[] = [
       db.prepare(`DELETE FROM recommendations WHERE did = ?`).bind(did),

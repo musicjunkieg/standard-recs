@@ -63,6 +63,8 @@ SYNC_DOCS_MAX_BATCHES = "300"
 WINDOW_DAYS = "30"
 TOP_N = "10"
 WORKER_URL = "https://standard-recs.bryan-78d.workers.dev"
+LIKE_EMBED_MODE = "both"
+LIKE_QUERY_NAMESPACE = "likes"
 
 # ─── Limits ───
 

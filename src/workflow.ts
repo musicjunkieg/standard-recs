@@ -20,7 +20,7 @@ import type { Env } from "./env.js";
 import { syncUserLikes, syncAllLikes, pruneStaleLikes } from "./sync/likes.js";
 import { syncDocumentsBatch } from "./sync/documents.js";
 import { runDiscovery } from "./sync/discover.js";
-import { embedAll } from "./recommend/embed.js";
+import { embedAll, parseEmbedMode, parseLikesNamespace } from "./recommend/embed.js";
 import { generateAllRecommendations, generateUserRecommendations } from "./recommend/index.js";
 
 export type SyncParams =
@@ -84,13 +84,20 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       );
     } else if (this.env.VOYAGE_API_KEY) {
       await step.do(`embed-for-user-${did}`, async () => {
-        const result = await embedAll(this.env.DB, this.env.VECTORS, this.env.VOYAGE_API_KEY);
+        const embedMode = parseEmbedMode(this.env.LIKE_EMBED_MODE);
+        const result = await embedAll(
+          this.env.DB,
+          this.env.VECTORS,
+          this.env.VOYAGE_API_KEY,
+          embedMode,
+        );
         return { likes: result.likes, documents: result.documents };
       });
 
       await step.do(`recommend-for-user-${did}`, async () => {
+        const likesNamespace = parseLikesNamespace(this.env.LIKE_QUERY_NAMESPACE);
         const recs = await generateUserRecommendations(
-          this.env.DB, this.env.VECTORS, did, topN,
+          this.env.DB, this.env.VECTORS, did, topN, likesNamespace,
         );
         return { count: recs.length };
       });
@@ -148,7 +155,13 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       );
     } else if (this.env.VOYAGE_API_KEY) {
       const embedResult = await step.do("embed", async () => {
-        const result = await embedAll(this.env.DB, this.env.VECTORS, this.env.VOYAGE_API_KEY);
+        const embedMode = parseEmbedMode(this.env.LIKE_EMBED_MODE);
+        const result = await embedAll(
+          this.env.DB,
+          this.env.VECTORS,
+          this.env.VOYAGE_API_KEY,
+          embedMode,
+        );
         return { likes: result.likes, documents: result.documents, errors: result.errors };
       });
 
@@ -156,7 +169,8 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
 
       // Step 6: Generate recommendations
       const recCount = await step.do("recommend", async () => {
-        return await generateAllRecommendations(this.env.DB, this.env.VECTORS, topN);
+        const likesNamespace = parseLikesNamespace(this.env.LIKE_QUERY_NAMESPACE);
+        return await generateAllRecommendations(this.env.DB, this.env.VECTORS, topN, likesNamespace);
       });
 
       console.log(`Recommendations: ${recCount} total`);

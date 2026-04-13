@@ -16,7 +16,8 @@ import { AtpAgent } from "@atproto/api";
 // doesn't include rpc:app.bsky.actor.getProfile.
 const publicAgent = new AtpAgent({ service: "https://public.api.bsky.app" });
 import { listUsers } from "../sync/users.js";
-import { VOYAGE_API, VOYAGE_MODEL, EMBEDDING_DIMENSIONS } from "../recommend/embed.js";
+import { VOYAGE_API, VOYAGE_MODEL, EMBEDDING_DIMENSIONS, LIKES_NAMESPACE_QUERY, LIKES_NAMESPACE_DOC } from "../recommend/embed.js";
+import { generateUserRecommendations } from "../recommend/index.js";
 import { enrollPage } from "./enroll-page.js";
 import { recsPage } from "./recs-page.js";
 import { recsLookupPage } from "./recs-lookup-page.js";
@@ -248,6 +249,99 @@ api.post("/admin/sync-user/:did", async (c) => {
   });
 
   return c.json({ triggered: true, instanceId: instance.id, did });
+});
+
+// Compare recommendations between the two like-embedding namespaces.
+// POST because generateUserRecommendations *can* write to D1 — we pass
+// dryRun=true here so this endpoint computes both rec lists without
+// touching the persisted recommendations table.
+api.post("/admin/compare-recs", async (c) => {
+  const did = c.req.query("did");
+  if (!did) {
+    return c.json({ error: "missing did query param" }, 400);
+  }
+
+  const topN = parseInt(c.env.TOP_N ?? "10", 10) || 10;
+
+  const [queryRecs, docRecs] = await Promise.all([
+    generateUserRecommendations(
+      c.env.DB,
+      c.env.VECTORS,
+      did,
+      topN,
+      LIKES_NAMESPACE_QUERY,
+      true, // dryRun
+    ),
+    generateUserRecommendations(
+      c.env.DB,
+      c.env.VECTORS,
+      did,
+      topN,
+      LIKES_NAMESPACE_DOC,
+      true, // dryRun
+    ),
+  ]);
+
+  // Enrich each rec with document metadata. Mirrors the join the public
+  // /recs/:did route uses: documents has no `url` column — the resolved
+  // web URL is built from the publication's URL plus the document's path.
+  const allUris = Array.from(
+    new Set([...queryRecs, ...docRecs].map((r) => r.document_uri)),
+  );
+
+  type DocRow = {
+    uri: string;
+    title: string;
+    description: string | null;
+    site: string | null;
+    path: string | null;
+    publication_url: string | null;
+    publication_name: string | null;
+  };
+
+  let docs: DocRow[] = [];
+  if (allUris.length > 0) {
+    const placeholders = allUris.map(() => "?").join(",");
+    const result = await c.env.DB.prepare(
+      `SELECT d.uri, d.title, d.description, d.site, d.path,
+              p.url AS publication_url, p.name AS publication_name
+       FROM documents d
+       LEFT JOIN publications p ON d.site = p.uri
+       WHERE d.uri IN (${placeholders})`,
+    )
+      .bind(...allUris)
+      .all<DocRow>();
+    docs = result.results;
+  }
+
+  const docMap = new Map(docs.map((d) => [d.uri, d]));
+
+  const enrich = (rec: { document_uri: string; score: number }) => {
+    const d = docMap.get(rec.document_uri);
+    return {
+      uri: rec.document_uri,
+      score: rec.score,
+      title: d?.title ?? null,
+      description: d?.description ?? null,
+      url: buildDocumentUrl(
+        d?.publication_url ?? null,
+        d?.site ?? null,
+        d?.path ?? null,
+      ),
+      site:
+        d?.publication_name ??
+        extractHostname(d?.publication_url ?? null) ??
+        extractHostname(d?.site ?? null) ??
+        null,
+    };
+  };
+
+  return c.json({
+    did,
+    topN,
+    query: queryRecs.map(enrich),
+    document: docRecs.map(enrich),
+  });
 });
 
 // Start the Jetstream listener DO

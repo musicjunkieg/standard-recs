@@ -2,7 +2,10 @@
  * Embedding pipeline — Voyage AI voyage-3.5-lite.
  *
  * Uses Voyage's input_type parameter for better retrieval:
- *   - Likes are embedded as "query" (what the user is looking for)
+ *   - Likes are embedded as "query", "document", or both, controlled by
+ *     LIKE_EMBED_MODE. The doc-embedded copies live in the "likes_doc"
+ *     namespace with vector IDs prefixed by "d:" so namespace lookups
+ *     stay unambiguous.
  *   - Documents are embedded as "document" (what's being retrieved)
  *
  * This cross-domain optimization is a free quality boost from Voyage
@@ -19,11 +22,78 @@ export const VOYAGE_MODEL = "voyage-3.5-lite";
 export const EMBEDDING_DIMENSIONS = 1024;
 const BATCH_SIZE = 100;
 
+export const LIKES_NAMESPACE_QUERY = "likes";
+export const LIKES_NAMESPACE_DOC = "likes_doc";
+export const LIKES_DOC_ID_PREFIX = "d:";
+
+export type LikeEmbedMode = "query" | "document" | "both";
+
+export function parseEmbedMode(raw: string | undefined): LikeEmbedMode {
+  if (raw === "document" || raw === "both") return raw;
+  return "query";
+}
+
+export function parseLikesNamespace(raw: string | undefined): string {
+  return raw === LIKES_NAMESPACE_DOC ? LIKES_NAMESPACE_DOC : LIKES_NAMESPACE_QUERY;
+}
+
 type EmbedResult = {
   likes: number;
   documents: number;
   errors: number;
 };
+
+/**
+ * Embed likes into the specified namespace(s).
+ */
+async function embedLikesIntoNamespace(
+  vectors: VectorizeIndex,
+  apiKey: string,
+  rows: Array<{ uri: string; liked_post_text: string }>,
+  inputType: "query" | "document",
+  namespace: string,
+  idPrefix: string,
+): Promise<{ embedded: number; errors: number }> {
+  if (rows.length === 0) return { embedded: 0, errors: 0 };
+
+  let embedded = 0;
+  let errors = 0;
+  const batches = chunk(rows, BATCH_SIZE);
+
+  for (const batch of batches) {
+    try {
+      const texts = batch.map((l) => l.liked_post_text);
+      const embeddings = await getEmbeddings(texts, apiKey, inputType);
+
+      if (embeddings.length !== texts.length) {
+        throw new Error(
+          `Voyage returned ${embeddings.length} embeddings for ${texts.length} inputs`,
+        );
+      }
+
+      const baseIds = await vectorIds(batch.map((l) => l.uri));
+      const ids = baseIds.map((h) => idPrefix + h);
+
+      const vectorBatch: VectorizeVector[] = embeddings.map((values, i) => ({
+        id: ids[i],
+        values,
+        namespace,
+        metadata: { type: "like", uri: batch[i].uri },
+      }));
+
+      await vectors.upsert(vectorBatch);
+      embedded += batch.length;
+    } catch (err) {
+      errors += batch.length;
+      console.error(
+        `Like embedding batch failed (${namespace}):`,
+        truncErr(err),
+      );
+    }
+  }
+
+  return { embedded, errors };
+}
 
 /**
  * Embed all un-embedded likes and documents.
@@ -32,12 +102,14 @@ export async function embedAll(
   db: D1Database,
   vectors: VectorizeIndex,
   apiKey: string,
+  embedMode: LikeEmbedMode = "query",
 ): Promise<EmbedResult> {
-  let likeCount = 0;
+  let queryEmbedCount = 0;
+  let docEmbedCount = 0;
   let docCount = 0;
   let errors = 0;
 
-  // --- Likes (embedded as "query") ---
+  // --- Likes (one or both namespaces depending on mode) ---
   const { results: unembeddedLikes } = await db
     .prepare(
       `SELECT uri, liked_post_text FROM likes
@@ -47,29 +119,33 @@ export async function embedAll(
     )
     .all<{ uri: string; liked_post_text: string }>();
 
-  if (unembeddedLikes.length > 0) {
-    const batches = chunk(unembeddedLikes, BATCH_SIZE);
+  const wantQuery = embedMode === "query" || embedMode === "both";
+  const wantDoc = embedMode === "document" || embedMode === "both";
 
-    for (const batch of batches) {
-      try {
-        const texts = batch.map((l) => l.liked_post_text);
-        const embeddings = await getEmbeddings(texts, apiKey, "query");
+  if (wantQuery) {
+    const r = await embedLikesIntoNamespace(
+      vectors,
+      apiKey,
+      unembeddedLikes,
+      "query",
+      LIKES_NAMESPACE_QUERY,
+      "",
+    );
+    queryEmbedCount += r.embedded;
+    errors += r.errors;
+  }
 
-        const ids = await vectorIds(batch.map((l) => l.uri));
-        const vectorBatch: VectorizeVector[] = embeddings.map((values, i) => ({
-          id: ids[i],
-          values,
-          namespace: "likes",
-          metadata: { type: "like", uri: batch[i].uri },
-        }));
-
-        await vectors.upsert(vectorBatch);
-        likeCount += batch.length;
-      } catch (err) {
-        errors += batch.length;
-        console.error("Like embedding batch failed:", truncErr(err));
-      }
-    }
+  if (wantDoc) {
+    const r = await embedLikesIntoNamespace(
+      vectors,
+      apiKey,
+      unembeddedLikes,
+      "document",
+      LIKES_NAMESPACE_DOC,
+      LIKES_DOC_ID_PREFIX,
+    );
+    docEmbedCount += r.embedded;
+    errors += r.errors;
   }
 
   // --- Documents (embedded as "document") ---
@@ -99,6 +175,12 @@ export async function embedAll(
 
         const embeddings = await getEmbeddings(texts, apiKey, "document");
 
+        if (embeddings.length !== texts.length) {
+          throw new Error(
+            `Voyage returned ${embeddings.length} embeddings for ${texts.length} inputs`,
+          );
+        }
+
         const ids = await vectorIds(batch.map((d) => d.uri));
         const vectorBatch: VectorizeVector[] = embeddings.map((values, i) => ({
           id: ids[i],
@@ -116,10 +198,15 @@ export async function embedAll(
     }
   }
 
+  // Both branches process the same input rows, so the count of distinct
+  // likes touched in this run is whichever branch ran (or the max in "both").
+  const likesProcessed = Math.max(queryEmbedCount, docEmbedCount);
   console.log(
-    `Embedded ${likeCount} likes, ${docCount} documents (${errors} errors)`,
+    `Embedded ${likesProcessed} likes ` +
+      `(query=${queryEmbedCount}, doc=${docEmbedCount}), ` +
+      `${docCount} documents (${errors} errors)`,
   );
-  return { likes: likeCount, documents: docCount, errors };
+  return { likes: likesProcessed, documents: docCount, errors };
 }
 
 /**
