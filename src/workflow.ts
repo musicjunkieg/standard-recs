@@ -36,6 +36,10 @@ function parseIntOrDefault(value: string | undefined, fallback: number): number 
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseLikesNamespace(value: string | undefined): string {
+  return value === "likes_doc" ? "likes_doc" : "likes";
+}
+
 export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
   async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep) {
     const params = event.payload;
@@ -95,8 +99,9 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       });
 
       await step.do(`recommend-for-user-${did}`, async () => {
+        const likesNamespace = parseLikesNamespace(this.env.LIKE_QUERY_NAMESPACE);
         const recs = await generateUserRecommendations(
-          this.env.DB, this.env.VECTORS, did, topN,
+          this.env.DB, this.env.VECTORS, did, topN, likesNamespace,
         );
         return { count: recs.length };
       });
@@ -168,7 +173,8 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
 
       // Step 6: Generate recommendations
       const recCount = await step.do("recommend", async () => {
-        return await generateAllRecommendations(this.env.DB, this.env.VECTORS, topN);
+        const likesNamespace = parseLikesNamespace(this.env.LIKE_QUERY_NAMESPACE);
+        return await generateAllRecommendations(this.env.DB, this.env.VECTORS, topN, likesNamespace);
       });
 
       console.log(`Recommendations: ${recCount} total`);
