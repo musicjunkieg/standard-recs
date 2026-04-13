@@ -65,6 +65,7 @@ TOP_N = "10"
 WORKER_URL = "https://standard-recs.bryan-78d.workers.dev"
 LIKE_EMBED_MODE = "query"
 LIKE_QUERY_NAMESPACE = "likes"
+MMR_LAMBDA = "0.6"
 
 # ─── Limits ───
 
@@ -74,3 +75,15 @@ subrequests = 50000
 # Secret (set via CLI):
 #   wrangler secret put VOYAGE_API_KEY
 #   wrangler secret put OAUTH_PRIVATE_KEY
+
+[[routes]]
+pattern = "standardrecs.site"
+custom_domain = true
+
+[[routes]]
+pattern = "nonstandardrecs.site"
+custom_domain = true
+
+[[routes]]
+pattern = "substandardrecs.site"
+custom_domain = true
