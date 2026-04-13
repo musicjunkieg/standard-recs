@@ -81,3 +81,10 @@ CREATE TABLE IF NOT EXISTS oauth_sessions (
   session TEXT NOT NULL,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- 2026-04-13: Add variant column for the nonstandardrecs / substandardrecs
+-- variant system. Existing rows default to 'standard' via the DEFAULT clause,
+-- so there's no backfill step. The PK stays (did, document_uri); see the spec
+-- for the disjointness invariant that keeps this safe across variants.
+ALTER TABLE recommendations ADD COLUMN variant TEXT NOT NULL DEFAULT 'standard';
+CREATE INDEX IF NOT EXISTS idx_recs_did_variant ON recommendations(did, variant);
