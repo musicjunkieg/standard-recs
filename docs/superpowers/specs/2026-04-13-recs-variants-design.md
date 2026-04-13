@@ -22,8 +22,8 @@ This spec covers the **variant infrastructure** plus **`nonstandardrecs`'s MMR r
 - A variant abstraction (`Variant` type, `VARIANTS` registry, `HOSTNAME_TO_VARIANT` lookup).
 - Hono middleware that reads `host` and stores the matched variant on the request context.
 - Three `[[routes]]` blocks in `wrangler.toml` so one Worker serves all three subdomains as custom domains.
-- Schema change: add a `variant` column to the `recommendations` table plus an index on `(did, variant)`.
-- `generateUserRecommendations()` computes *all* enabled variants for a user in one pass and writes them in a single D1 batch.
+- Schema change: add `variant` and `rank` columns to the `recommendations` table as first-class columns on the CREATE TABLE statement, plus an index on `(did, variant)`. Historical ad-hoc ALTERs are preserved as commented migration history at the bottom of `schema.sql`.
+- `generateUserRecommendations()` computes *all* enabled variants for a user in one pass and writes them in a single D1 batch. Each rec carries a `rank` value that preserves the original pick order (for MMR: the greedy selection sequence; for top-N: the cosine-descending order).
 - **Nonstandard ranking via MMR (Maximal Marginal Relevance)** — Carbonell & Goldstein 1998. λ=0.6, tunable via new `MMR_LAMBDA` env var.
 - Theme refactor: the existing enroll + recs page templates move from hardcoded colors to CSS custom properties driven per-variant at render time.
 - Per-variant copy (title, tagline, input placeholder, recs heading, footer message) lives in `VARIANTS`.
@@ -152,23 +152,48 @@ All three subdomains are already on Cloudflare DNS under the same account as the
 
 ### Schema change
 
-One `ALTER TABLE` plus one new index:
+`schema.sql` describes the `recommendations` table's **final shape** directly via `CREATE TABLE IF NOT EXISTS`. Fresh databases bootstrapped via `npm run db:init` get the final columns on first run with no ALTERs required:
 
 ```sql
 -- schema.sql
 
-ALTER TABLE recommendations ADD COLUMN variant TEXT NOT NULL DEFAULT 'standard';
+CREATE TABLE IF NOT EXISTS recommendations (
+  did TEXT NOT NULL,
+  document_uri TEXT NOT NULL,
+  score REAL NOT NULL,
+  variant TEXT NOT NULL DEFAULT 'standard',
+  rank INTEGER NOT NULL DEFAULT 0,
+  generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (did, document_uri),
+  FOREIGN KEY (did) REFERENCES users(did),
+  FOREIGN KEY (document_uri) REFERENCES documents(uri)
+);
+
 CREATE INDEX IF NOT EXISTS idx_recs_did_variant ON recommendations(did, variant);
 ```
 
-Existing rows pick up `'standard'` via the default — no data loss, no backfill script. The PK stays `(did, document_uri)` — **but this is load-bearing on an invariant every future ranking strategy must respect**:
+**`variant`** is the discriminator used by the route handler's `WHERE r.variant = ?` predicate and by the SQL filter at read time. **`rank`** is a zero-indexed position within each variant that preserves the algorithm's original pick order — for standard this is top-N by cosine, for nonstandard it's the MMR greedy selection sequence (pick 0 = first pick, pick N-1 = biggest "trust us" stretch). Sorting by `r.score DESC` at read time would scramble the nonstandard list back into a cosine ordering, discarding the information MMR encoded in pick order, so the SELECT uses `ORDER BY r.rank ASC`.
+
+**For the existing production database**, the two columns were applied ad-hoc during PR development:
+
+```sql
+-- applied 2026-04-13 via wrangler d1 execute --remote --command=...
+ALTER TABLE recommendations ADD COLUMN variant TEXT NOT NULL DEFAULT 'standard';
+ALTER TABLE recommendations ADD COLUMN rank INTEGER NOT NULL DEFAULT 0;
+```
+
+These live as comments at the bottom of `schema.sql` under a "Migration history" section. SQLite's `ALTER TABLE ADD COLUMN` is idempotent-unsafe (errors on duplicate column), so the executable SQL in `schema.sql` is now a single `CREATE TABLE` that describes the final shape, and re-running `schema.sql` is safe on both fresh and already-migrated databases. No migration system: this project has a single production DB and a low schema-change cadence; if that changes, move the history to a real `migrations/` directory with timestamped files and a tracking table.
+
+Existing pre-migration rows (all standard by definition) picked up `variant = 'standard'` and `rank = 0` via the column defaults. The next cron run's `generateUserRecommendations` rewrites every row with proper rank values, so the default-0 state is transient.
+
+The PK stays `(did, document_uri)` without a `variant` column — **but this is load-bearing on an invariant every future ranking strategy must respect**:
 
 - MMR explicitly excludes the standard top-12 from the nonstandard candidate pool (via `candidates.slice(topN)` in `generateUserRecommendations`, where `topN = parseInt(env.TOP_N, 10)` — the same value that sizes the standard rec list), so no document appears in both standard and nonstandard for the same user in the same run.
 - Anti-recs will draw from the tail of the cosine ranking, disjoint from the top-12.
 - **If a future `RankingStrategy` ever produces a document already in another variant for the same user, the INSERT will hit a PK conflict and fail.** The strategy author must guarantee disjointness, or this spec's PK decision must be revisited first (bump PK to `(did, document_uri, variant)`).
 - YAGNI says don't bump the PK preemptively, but any reviewer of a new strategy should check this invariant.
 
-The new index makes `SELECT ... WHERE did = ? AND variant = ?` cheap. Without it, every recs request would scan the user's whole rec history across all variants.
+The `idx_recs_did_variant` index makes `SELECT ... WHERE did = ? AND variant = ?` cheap. Without it, every recs request would scan the user's whole rec history across all variants.
 
 ### Data flow (request time)
 
@@ -367,7 +392,7 @@ No changes to the middleware, the routing, the schema, the page templates, or th
 | `src/api/recs-page.ts` | modify | `recsPage` becomes a function taking `Variant` via `RecsPageData`, new `placeholder` state, CSS refactor matching enroll-page |
 | `src/api/recs-lookup-page.ts` | modify | Accept `Variant` parameter. **Only `variant.copy.*` threads through** — the h1 title, input placeholder, and footer text change per variant, but the palette, borders, focus states, and overall styling stay on the older warm-cream + Newsreader aesthetic. The `variant.brand` palette/blob colors are **intentionally deferred**: the file has no `:root` block or blob field, and bolting on a partial brand-color treatment would be a half-measure. A proper variant visual identity for this page is a separate spec / follow-up PR that redesigns it to match the glass aesthetic of enroll-page and recs-page. |
 | `src/env.ts` | modify | New `MMR_LAMBDA: string` binding |
-| `schema.sql` | modify | `ALTER TABLE recommendations ADD COLUMN variant ...` + new index |
+| `schema.sql` | modify | `CREATE TABLE recommendations` gains `variant TEXT NOT NULL DEFAULT 'standard'` and `rank INTEGER NOT NULL DEFAULT 0` as first-class columns + new `idx_recs_did_variant` index. Historical ad-hoc ALTERs preserved as commented migration history. |
 | `wrangler.toml` | modify | Two new `[[routes]]` blocks, one new var `MMR_LAMBDA = "0.6"` |
 
 Net: two new files, seven modified files, one schema migration.
