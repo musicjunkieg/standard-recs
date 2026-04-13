@@ -29,7 +29,8 @@
  *
  * Requires `tasteVector` and every candidate/seed's `values` to be
  * populated — pass `returnValues: true` on the originating
- * `vectors.query()` call or this function will throw on the `!` below.
+ * `vectors.query()` call. The function fails fast with a clear error
+ * message if any input is missing its values vector.
  */
 export function pickMMR(
   candidates: VectorizeMatch[],
@@ -41,6 +42,16 @@ export function pickMMR(
   const picked: VectorizeMatch[] = [...seed];
   const result: VectorizeMatch[] = [];
   const remaining: VectorizeMatch[] = [...candidates];
+
+  // Defensive guard — the caller must pass returnValues: true on the
+  // originating vectors.query() call. Without values, dot() would crash
+  // with a cryptic TypeError inside the loop. Fail fast and clearly instead.
+  for (const c of candidates) {
+    if (!c.values) throw new Error("pickMMR: candidate missing values — caller must set returnValues: true");
+  }
+  for (const s of seed) {
+    if (!s.values) throw new Error("pickMMR: seed missing values — caller must set returnValues: true");
+  }
 
   while (result.length < k && remaining.length > 0) {
     let bestIdx = -1;

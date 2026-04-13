@@ -145,11 +145,19 @@ export async function generateUserRecommendations(
     variant: "standard" as const,
   }));
 
-  // 5c. Nonstandard recs: MMR over the remaining candidates, with the
-  // standard top-N as the seed set (diversify against what standard
-  // already picked). The `lambda` parameter is threaded in from the
-  // function signature — the workflow layer reads MMR_LAMBDA env var
-  // and passes it through.
+  // 5c. Nonstandard recs: MMR over the tail of the candidate pool
+  // (indices topN onward), with the standard top-N as the seed set
+  // (diversify against what standard already picked).
+  //
+  // LOAD-BEARING: The `validMatches.slice(topN)` split ensures
+  // standard and nonstandard variants for the same user NEVER share
+  // a document_uri. This is required because the `recommendations`
+  // PK is (did, document_uri) without a `variant` column — if the
+  // two variants ever produced the same doc, the D1 INSERT would
+  // fail with a UNIQUE constraint violation. Any future variant that
+  // re-ranks over the full validMatches must either (a) preserve this
+  // disjointness invariant or (b) update the schema PK first.
+  // See: docs/superpowers/specs/2026-04-13-recs-variants-design.md
   const nonstandardMatches = pickMMR(
     validMatches.slice(topN),
     standardMatches,
@@ -183,7 +191,15 @@ export async function generateUserRecommendations(
     await db.batch(stmts);
   }
 
-  console.log(`  ${did}: ${recs.length} recommendations generated`);
+  console.log(
+    `  ${did}: ${standardRecs.length} standard + ${nonstandardRecs.length} nonstandard recommendations generated`,
+  );
+  if (nonstandardRecs.length < topN) {
+    console.warn(
+      `  ${did}: nonstandard recs short (${nonstandardRecs.length}/${topN}) — ` +
+      `validMatches=${validMatches.length}, CANDIDATE_POOL=${CANDIDATE_POOL}`,
+    );
+  }
   return recs;
 }
 
