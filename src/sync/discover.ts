@@ -89,27 +89,46 @@ export async function seedPublishers(db: D1Database): Promise<number> {
  * @returns The number of publisher DIDs that were newly inserted into the `publishers` table during this run
  */
 export async function discoverViaLightrail(db: D1Database): Promise<number> {
+  // Buffer DIDs and flush via db.batch() — a per-row INSERT was the dominant
+  // cost of this step (one D1 round-trip per row × ~20k rows blew the
+  // default 10-minute Workflow step timeout). Batching collapses that to one
+  // round-trip per BATCH_SIZE rows.
+  const BATCH_SIZE = 100;
   let discovered = 0;
+  const buffer: string[] = [];
+
+  const flush = async () => {
+    if (buffer.length === 0) return;
+    const stmts = buffer.map((did) =>
+      db
+        .prepare(`INSERT OR IGNORE INTO publishers (did, label) VALUES (?, ?)`)
+        .bind(did, "auto:lightrail"),
+    );
+    // Let errors propagate. INSERT OR IGNORE makes batch retries idempotent,
+    // and the discover step has an explicit retry policy in workflow.ts that
+    // will handle transient D1 issues. Swallowing here would hide failures
+    // from the workflow framework and prevent the retry from running.
+    const results = await db.batch(stmts);
+    for (const r of results) {
+      if ((r.meta?.changes ?? 0) > 0) discovered++;
+    }
+    // Only clear the buffer after the batch lands. On failure the next
+    // retry restarts from a fresh iterator anyway, but keeping the invariant
+    // "buffer reflects rows not yet committed" is the cleaner contract.
+    buffer.length = 0;
+  };
 
   try {
     for await (const did of listReposByCollection(PUBLICATION_COLLECTION)) {
-      // Per-iteration try/catch: a single failed insert must not abort the
-      // whole lightrail stream. Keep the outer try around the iterator only.
-      try {
-        const result = await db
-          .prepare(
-            `INSERT OR IGNORE INTO publishers (did, label) VALUES (?, ?)`,
-          )
-          .bind(did, "auto:lightrail")
-          .run();
-        if ((result.meta.changes ?? 0) > 0) discovered++;
-      } catch (insertErr) {
-        console.error(`discoverViaLightrail insert failed for ${did}:`, insertErr);
-        continue;
+      buffer.push(did);
+      if (buffer.length >= BATCH_SIZE) {
+        await flush();
       }
     }
+    await flush();
   } catch (err) {
-    console.error("discoverViaLightrail stream failed:", err);
+    console.error("discoverViaLightrail failed:", err);
+    throw err;
   }
 
   return discovered;
@@ -189,16 +208,16 @@ export async function runDiscovery(
 
   let discoveryErrors = 0;
 
+  // Lightrail is the primary discovery path. Let its errors propagate so the
+  // workflow step's retry policy sees them — swallowing here would silently
+  // turn transient D1/HTTP failures into "successful" runs with partial data.
   console.log("  Discovering publishers via lightrail...");
-  let fromLightrail = 0;
-  try {
-    fromLightrail = await discoverViaLightrail(db);
-  } catch (err) {
-    discoveryErrors++;
-    console.error("  discoverViaLightrail threw:", err);
-  }
+  const fromLightrail = await discoverViaLightrail(db);
   console.log(`    ${fromLightrail} new publishers from lightrail`);
 
+  // Social graph is bounded at 50 candidates and the per-candidate failure
+  // mode (PDS unreachable, etc.) is genuinely "skip and continue". Keep the
+  // resilience here — a flaky PDS shouldn't block the rest of discovery.
   console.log("  Discovering publishers from social graph...");
   let fromSocialGraph = 0;
   try {

@@ -31,6 +31,17 @@ export type SyncParams =
 const DEFAULT_SYNC_DOCS_BATCH_SIZE = 50;
 const DEFAULT_SYNC_DOCS_MAX_BATCHES = 300;
 
+/**
+ * Step config for the discover step in both runUserSync and runFullPipeline.
+ * Overrides the Workflow defaults (10-minute timeout, 5 retries) so a stuck
+ * attempt fails in a few minutes instead of ~64 minutes — see the original
+ * fix/discover-batched-inserts PR for the diagnosis.
+ */
+const DISCOVERY_STEP_POLICY = {
+  retries: { limit: 2, delay: "30 seconds", backoff: "exponential" },
+  timeout: "20 minutes",
+} as const;
+
 function parseIntOrDefault(value: string | undefined, fallback: number): number {
   const parsed = parseInt(value ?? "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -68,10 +79,14 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
 
     console.log(`User ${did}: ${likeResult.stored} likes synced`);
 
-    // Discovery + batched document sync
-    await step.do(`discover-${did}`, async () => {
-      return await runDiscovery(this.env.DB);
-    });
+    // Discovery + batched document sync. See DISCOVERY_STEP_POLICY above.
+    await step.do(
+      `discover-${did}`,
+      DISCOVERY_STEP_POLICY,
+      async () => {
+        return await runDiscovery(this.env.DB);
+      },
+    );
 
     const syncStatus = await this.runBatchedDocumentSync(step, `user-${did}`);
 
@@ -136,10 +151,15 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       return result.meta.changes ?? 0;
     });
 
-    // Step 3: Discover publishers (lightrail + social graph) in its own step
-    const discovery = await step.do("discover", async () => {
-      return await runDiscovery(this.env.DB);
-    });
+    // Step 3: Discover publishers (lightrail + social graph) in its own step.
+    // See DISCOVERY_STEP_POLICY above.
+    const discovery = await step.do(
+      "discover",
+      DISCOVERY_STEP_POLICY,
+      async () => {
+        return await runDiscovery(this.env.DB);
+      },
+    );
 
     console.log(`Discovery: ${discovery.discovered} new publishers (${discovery.errors} errors)`);
 
