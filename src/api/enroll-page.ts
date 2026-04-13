@@ -49,7 +49,7 @@ export function enrollPage(variant: Variant): string {
       -moz-osx-font-smoothing: grayscale;
     }
 
-    ::selection { background: #fef3c7; color: var(--ink); }
+    ::selection { background: color-mix(in srgb, var(--variant-brand) 35%, transparent); color: var(--ink); }
 
     /* atmospheric layer — diffuse blobs + floating glass shapes */
     .atmosphere {
@@ -260,7 +260,7 @@ export function enrollPage(variant: Variant): string {
       box-shadow:
         0 6px 28px rgba(61, 52, 45, 0.08),
         inset 0 0 12px rgba(255, 255, 255, 0.4),
-        0 0 0 4px rgba(230, 180, 100, 0.18);
+        0 0 0 4px color-mix(in srgb, var(--variant-brand) 18%, transparent);
     }
 
     input[type="text"] {

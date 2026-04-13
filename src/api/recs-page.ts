@@ -69,7 +69,7 @@ export function recsPage(data: RecsPageData): string {
       -moz-osx-font-smoothing: grayscale;
     }
 
-    ::selection { background: #fef3c7; color: var(--ink); }
+    ::selection { background: color-mix(in srgb, var(--variant-brand) 35%, transparent); color: var(--ink); }
 
     /* Atmosphere — fixed so it stays put while the grid scrolls */
     .atmosphere {
@@ -214,7 +214,7 @@ export function recsPage(data: RecsPageData): string {
       position: absolute;
       inset: 0;
       border-radius: inherit;
-      background: radial-gradient(circle at top right, rgba(230, 180, 100, 0.16) 0%, transparent 60%);
+      background: radial-gradient(circle at top right, color-mix(in srgb, var(--variant-brand) 16%, transparent) 0%, transparent 60%);
       opacity: 0;
       transition: opacity 0.3s ease;
       pointer-events: none;
@@ -290,8 +290,8 @@ export function recsPage(data: RecsPageData): string {
       align-items: center;
       color: var(--ink-soft);
       font-weight: 500;
-      background: rgba(230, 180, 100, 0.24);
-      border: 1px solid rgba(230, 180, 100, 0.55);
+      background: color-mix(in srgb, var(--variant-brand) 24%, transparent);
+      border: 1px solid color-mix(in srgb, var(--variant-brand) 55%, transparent);
       padding: 0.22rem 0.6rem;
       border-radius: 9999px;
       flex-shrink: 0;

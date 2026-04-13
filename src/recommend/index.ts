@@ -123,6 +123,21 @@ export async function generateUserRecommendations(
   // comparisons for the nonstandard diversity term. ~250KB per user
   // per cron — fine at any reasonable scale.
   const CANDIDATE_POOL = 50;
+
+  // Sanity check: the nonstandard MMR pool is whatever's left after
+  // the standard top-N is claimed, i.e., CANDIDATE_POOL - topN. If
+  // someone bumps TOP_N above CANDIDATE_POOL / 2, the nonstandard
+  // list silently underfills. Today TOP_N defaults to 12, leaving 38
+  // slots — generous. Warn loudly if the ratio inverts so the
+  // operator knows why nonstandard recs are short.
+  if (topN * 2 > CANDIDATE_POOL) {
+    console.warn(
+      `generateUserRecommendations: TOP_N=${topN} leaves only ${CANDIDATE_POOL - topN} ` +
+        `candidates for nonstandard MMR (pool=${CANDIDATE_POOL}). Bump CANDIDATE_POOL ` +
+        `or drop TOP_N for richer nonstandard recs.`,
+    );
+  }
+
   const matches = await vectors.query(tasteVector, {
     topK: CANDIDATE_POOL,
     namespace: "documents",

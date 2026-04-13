@@ -132,7 +132,17 @@ api.get("/recs/:did", async (c) => {
   }
 
   if (variant.ranking.kind === "placeholder") {
-    return c.html(recsPage({ state: "placeholder", variant }));
+    if (wantsHtml) {
+      return c.html(recsPage({ state: "placeholder", variant }));
+    }
+    return c.json({
+      did: user.did,
+      handle: user.handle,
+      variant: variant.key,
+      state: "placeholder",
+      message: "Recommendations for this variant aren't available yet.",
+      recommendations: [],
+    });
   }
 
   const { results: recs } = await c.env.DB.prepare(

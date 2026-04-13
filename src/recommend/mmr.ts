@@ -61,7 +61,13 @@ export function pickMMR(
       const cVec = remaining[i].values!;
       const relevance = dot(cVec, tasteVector);
 
-      let maxSim = 0;
+      // When picked is empty (only possible if seed was empty), no
+      // diversity penalty applies and the score collapses to pure
+      // relevance. Seed maxSim to -Infinity when picked is non-empty
+      // so negative cosines (semantically opposed items) are preserved
+      // in the penalty — MMR should reward items that are maximally
+      // diverse from the picked set, including "anti-matches."
+      let maxSim = picked.length > 0 ? -Infinity : 0;
       for (const p of picked) {
         const sim = dot(cVec, p.values!);
         if (sim > maxSim) maxSim = sim;

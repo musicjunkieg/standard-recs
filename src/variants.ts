@@ -13,8 +13,16 @@
 
 export type RankingStrategy =
   | { kind: "topN" }
-  | { kind: "mmr"; lambda: number; candidatePool: number }
+  | { kind: "mmr" }
   | { kind: "placeholder" };
+
+// MMR's lambda and candidate pool size are intentionally NOT on the
+// mmr arm. Lambda is tuned post-deploy via the MMR_LAMBDA env var
+// (see wrangler.toml + workflow.ts parseMmrLambda); the candidate pool
+// is pinned to 50 by Vectorize's per-query cap with returnMetadata="all"
+// (see src/recommend/index.ts CANDIDATE_POOL). If per-variant knobs
+// ever become necessary, add them back here AND update the recommend
+// flow to consume them with env fallback.
 
 export type Variant = {
   key: "standard" | "nonstandard" | "substandard";
@@ -67,7 +75,7 @@ export const VARIANTS: Record<Variant["key"], Variant> = {
       recsHeading: (handle) => `Adjacent picks for @${handle}`,
       footer: "An experiment by standard-recs",
     },
-    ranking: { kind: "mmr", lambda: 0.6, candidatePool: 50 },
+    ranking: { kind: "mmr" },
   },
   substandard: {
     key: "substandard",
