@@ -39,7 +39,7 @@ This spec is the fix for Bug 1 in `~/.claude/projects/-Users-bryan-guffey-Code-s
 - Filter the two existing SELECTs in `embed.ts` with `WHERE embedded_at IS NULL`.
 - Stamp rows on successful Vectorize upsert via a batched `UPDATE ... SET embedded_at = datetime('now') WHERE uri IN (...)`.
 - New env var `EMBED_BATCH_LIMIT = "2000"` replacing the hardcoded `LIMIT 500` in both SELECTs.
-- New indexes `idx_likes_embedded_at` and `idx_documents_embedded_at` supporting the `WHERE embedded_at IS NULL` predicate.
+- New partial indexes `idx_likes_unembedded` and `idx_documents_unembedded` (both with `WHERE embedded_at IS NULL`) supporting the filtered SELECTs without holding entries for already-embedded rows.
 - Schema change follows the CREATE-TABLE-as-final-state pattern established in PR #21: `schema.sql` describes the final shape directly; historical ALTERs live as commented migration history at the bottom.
 - Production migration via ad-hoc `wrangler d1 execute --remote --command=...` (same pattern as the `variant` and `rank` columns).
 
@@ -197,7 +197,7 @@ The documents SELECT has no explicit `ORDER BY`, matching the existing behavior 
 
 **Likes batch loop restructures to handle `LIKE_EMBED_MODE=both` correctly.** The existing `embedLikesIntoNamespace` helper has the per-batch loop internal to itself, which means in `both` mode it's called twice with the same rows — once per namespace. If the stamp goes inside the helper, the first call stamps and the second call might fail mid-batch, leaving rows stamped but absent from the second namespace. That breaks the invariant "embedded_at IS NOT NULL iff in Vectorize."
 
-**Fix: hoist the batch loop to `embedAll` so a single batch iteration covers all requested namespaces and stamps only after all upserts for that batch succeed.** The helper is either deleted or shrunk to a thin "one batch, one namespace" wrapper — probably the latter for readability.
+**Fix: hoist the batch loop to `embedAll` so a single batch iteration covers all requested namespaces and stamps only after all upserts for that batch succeed.** The `embedLikesIntoNamespace` helper is deleted — its Voyage call, parity check, and Vectorize upsert all move inline into the new loop. The helper existed to DRY up the two-namespace case, but the stamp invariant forces the two namespace calls to share a try block with the stamp, so keeping them as separate helper invocations and coordinating stamping across calls is strictly worse than inlining.
 
 The new batch loop shape in `embedAll`, replacing the two `embedLikesIntoNamespace` calls:
 
@@ -269,7 +269,7 @@ if (unembeddedLikes.length > 0 && (wantQuery || wantDoc)) {
 }
 ```
 
-**The old `embedLikesIntoNamespace` helper is deleted.** Its logic (Voyage call, parity check, Vectorize upsert) moves inline into the loop above. The helper was intended to DRY up the two-namespace case, but the stamp invariant forces the two namespace calls to share a try block with the stamp — so keeping them in a separate function and trying to coordinate stamping across calls is strictly worse than inlining. The inlined version is ~50 lines; the helper was ~40 lines plus the two call sites.
+**The inlined loop counters (`queryEmbedCount`, `docEmbedCount`) are incremented immediately after each successful `vectors.upsert()`, before the stamp runs.** This is intentional: if the stamp UPDATE fails (transient D1 blip) after the upserts succeeded, the catch block will increment `errors += batch.length` and the next cron re-embeds the batch (idempotent overwrite). The per-namespace counts end up slightly over-reporting in that specific failure window, which is a harmless observability quirk rather than a functional bug. The alternative (defer the increments to after the stamp) would under-report successful embeds in the same failure window, which is strictly worse for diagnosing backlog drain progress.
 
 **Documents loop — same stamp pattern, simpler because there's only one namespace:**
 
@@ -350,7 +350,7 @@ EMBED_BATCH_LIMIT = "2000"
 4. **Likes half:**
    - SELECT filters by `embedded_at IS NULL`, ordered by `liked_at DESC`, limited to `embedBatchLimit`.
    - If `unembeddedLikes.length === 0`, both branches (query / doc namespace per `LIKE_EMBED_MODE`) skip immediately.
-   - Otherwise, `embedLikesIntoNamespace` batches the rows at 100/call to Voyage, upserts each result to Vectorize, stamps the successful batches with `UPDATE likes SET embedded_at = datetime('now')`, logs errors for failed batches (which leave their rows unstamped for retry).
+   - Otherwise, an inlined batch loop in `embedAll` chunks the rows at 100/call to Voyage, upserts each result to Vectorize (to one namespace for `query`/`document` mode, or both for `both` mode — all within a single try block per batch), stamps the successful batches with `UPDATE likes SET embedded_at = datetime('now')` inside the same try, and logs errors for failed batches (which leave their rows unstamped for retry).
 5. **Documents half:**
    - Same pattern: SELECT filters `embedded_at IS NULL`, limited to `embedBatchLimit`, batched 100/call, upserted, stamped, logged.
 6. The top-level log line reports per-namespace embed counts, document count, error count, and the effective limit for the run.
@@ -408,8 +408,8 @@ This is the only "embed without stamp" race, and it's benign. The opposite race 
 
 | File | Status | Responsibility |
 |---|---|---|
-| `schema.sql` | modify | `CREATE TABLE likes` gains `embedded_at TEXT` (nullable). `CREATE TABLE documents` gains `embedded_at TEXT` (nullable). Two new `CREATE INDEX IF NOT EXISTS` statements for `idx_likes_embedded_at` and `idx_documents_embedded_at`. Historical ALTERs added to the "Migration history" section at the bottom. |
-| `src/recommend/embed.ts` | modify | New `DEFAULT_EMBED_BATCH_LIMIT` constant. `embedAll` gains a 5th parameter `embedBatchLimit` with default. Two SELECTs gain `AND embedded_at IS NULL` + parameterized `LIMIT ?`. Two UPDATE blocks stamping successful batches inside the try. Log line extended with effective limit. |
+| `schema.sql` | modify | `CREATE TABLE likes` gains `embedded_at TEXT` (nullable). `CREATE TABLE documents` gains `embedded_at TEXT` (nullable). Two new partial indexes: `idx_likes_unembedded` on `likes(liked_at DESC) WHERE embedded_at IS NULL` and `idx_documents_unembedded` on `documents(indexed_at) WHERE embedded_at IS NULL`. Historical ALTERs added to the "Migration history" section at the bottom. |
+| `src/recommend/embed.ts` | modify | New `DEFAULT_EMBED_BATCH_LIMIT` constant. `embedAll` gains a 5th parameter `embedBatchLimit` with default. Two SELECTs gain `AND embedded_at IS NULL` + parameterized `LIMIT ?`. **The `embedLikesIntoNamespace` private helper is deleted**; its per-batch loop inlines into `embedAll` directly so a single try block covers Voyage → parity check → Vectorize upsert(s) → stamp UPDATE across all requested namespaces for that batch. The documents loop gains a stamp UPDATE inside its existing try. Log line extended with effective limit. |
 | `src/workflow.ts` | modify | Both `embedAll` call sites (`runUserSync` and `runFullPipeline`) read `EMBED_BATCH_LIMIT` via `parseIntOrDefault` and pass it through as the 5th positional arg. |
 | `src/env.ts` | modify | New `EMBED_BATCH_LIMIT: string` binding in the Config vars section. |
 | `wrangler.toml` | modify | New `EMBED_BATCH_LIMIT = "2000"` in `[vars]`. Stash/pop dance required because of pre-session local edits. |
@@ -471,7 +471,7 @@ npx wrangler d1 execute standard-recs-db --remote \
 
 **Fail signals to watch for:**
 
-- **Embedded count doesn't increase between crons.** Something is wrong with the stamp UPDATE. Check `wrangler tail` for `Document embedding batch failed` or `Like embedding batch failed (${namespace})` entries.
+- **Embedded count doesn't increase between crons.** Something is wrong with the stamp UPDATE. Check `wrangler tail` for `Document embedding batch failed` or `Like embedding batch failed` entries.
 - **`errors > 0` in the embed log.** Expected occasionally on Voyage or D1 blips; chronic errors point at a real problem. Spot-check which batches are failing via the log entries.
 - **`likesProcessed === EMBED_BATCH_LIMIT`** after the first cron. Shouldn't happen at current data volumes (934 < 2000), but if it does, the likes backlog is deeper than expected.
 - **Wall-clock on the embed step dominates cron runtime or blows the Workflow step timeout.** Drop `EMBED_BATCH_LIMIT` to 1000 or 500 via wrangler.toml edit + `npm run deploy`.
