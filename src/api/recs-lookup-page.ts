@@ -5,12 +5,15 @@
  * On selection, navigates to /recs/by-handle/:handle for server-side DID resolution.
  */
 
-export const recsLookupPage = `<!DOCTYPE html>
+import type { Variant } from "../variants.js";
+
+export function recsLookupPage(variant: Variant): string {
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>standard-recs — Find recommendations</title>
+  <title>${variant.copy.title} — Find recommendations</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&family=DM+Sans:wght@400;500&display=swap" rel="stylesheet" />
   <style>
@@ -175,7 +178,7 @@ export const recsLookupPage = `<!DOCTYPE html>
 </head>
 <body>
   <div class="container">
-    <h1>standard-recs</h1>
+    <h1>${variant.copy.title}</h1>
     <p class="subtitle">
       Look up recommendations for<br>
       any enrolled Bluesky user.
@@ -185,7 +188,7 @@ export const recsLookupPage = `<!DOCTYPE html>
       <input
         type="text"
         id="handle-input"
-        placeholder="Search for a handle..."
+        placeholder="${variant.copy.placeholder}"
         autocomplete="off"
         spellcheck="false"
       />
@@ -199,7 +202,7 @@ export const recsLookupPage = `<!DOCTYPE html>
   </div>
 
   <footer>
-    Powered by <a href="https://standard.site">Standard.site</a>
+    ${variant.copy.footer}
     &middot; <a href="https://atproto.com">AT Protocol</a>
   </footer>
 
@@ -305,3 +308,5 @@ export const recsLookupPage = `<!DOCTYPE html>
   </script>
 </body>
 </html>`;
+}
+

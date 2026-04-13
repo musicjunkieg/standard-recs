@@ -4,17 +4,25 @@
  * Uses typeahead.waow.tech for handle autocomplete.
  */
 
-export const enrollPage = `<!DOCTYPE html>
+import type { Variant } from "../variants.js";
+
+export function enrollPage(variant: Variant): string {
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>standard-recs</title>
+  <title>${variant.copy.title}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Inter:wght@400;500&display=swap" rel="stylesheet" />
   <style>
     :root {
+      --variant-brand: ${variant.brand.hex};
+      --variant-blob-1: ${variant.brand.blobs[0]};
+      --variant-blob-2: ${variant.brand.blobs[1]};
+      --variant-blob-3: ${variant.brand.blobs[2]};
+      --variant-blob-4: ${variant.brand.blobs[3]};
       --paper: #f7f3eb;
       --ink: #3d342d;
       --ink-soft: #4a443f;
@@ -41,7 +49,7 @@ export const enrollPage = `<!DOCTYPE html>
       -moz-osx-font-smoothing: grayscale;
     }
 
-    ::selection { background: #fef3c7; color: var(--ink); }
+    ::selection { background: color-mix(in srgb, var(--variant-brand) 35%, transparent); color: var(--ink); }
 
     /* atmospheric layer — diffuse blobs + floating glass shapes */
     .atmosphere {
@@ -63,27 +71,27 @@ export const enrollPage = `<!DOCTYPE html>
 
     .blob--amber {
       width: 500px; height: 400px;
-      background: radial-gradient(circle, rgba(230, 180, 100, 0.6) 0%, rgba(230, 180, 100, 0) 70%);
+      background: radial-gradient(circle, var(--variant-blob-1) 0%, transparent 70%);
       top: 20%; left: 10%;
       animation-delay: 0s, 1.8s;
     }
     .blob--blue {
       width: 600px; height: 450px;
-      background: radial-gradient(circle, rgba(147, 197, 253, 0.5) 0%, rgba(147, 197, 253, 0) 70%);
+      background: radial-gradient(circle, var(--variant-blob-2) 0%, transparent 70%);
       top: 15%; right: 5%;
       animation-delay: 0.15s, 1.95s;
       animation-duration: 1.8s, 26s;
     }
     .blob--violet {
       width: 400px; height: 300px;
-      background: radial-gradient(circle, rgba(167, 139, 250, 0.3) 0%, rgba(167, 139, 250, 0) 70%);
+      background: radial-gradient(circle, var(--variant-blob-3) 0%, transparent 70%);
       bottom: 20%; left: 40%;
       animation-delay: 0.3s, 2.1s;
       animation-duration: 1.8s, 24s;
     }
     .blob--center {
       width: 700px; height: 300px;
-      background: radial-gradient(circle, rgba(255, 230, 180, 0.4) 0%, rgba(255, 230, 180, 0) 70%);
+      background: radial-gradient(circle, var(--variant-blob-4) 0%, transparent 70%);
       top: 50%; left: 50%;
       margin-top: -150px;
       margin-left: -350px;
@@ -252,7 +260,7 @@ export const enrollPage = `<!DOCTYPE html>
       box-shadow:
         0 6px 28px rgba(61, 52, 45, 0.08),
         inset 0 0 12px rgba(255, 255, 255, 0.4),
-        0 0 0 4px rgba(230, 180, 100, 0.18);
+        0 0 0 4px color-mix(in srgb, var(--variant-brand) 18%, transparent);
     }
 
     input[type="text"] {
@@ -443,9 +451,9 @@ export const enrollPage = `<!DOCTYPE html>
   </div>
 
   <main>
-    <h1>standard-recs</h1>
+    <h1>${variant.copy.title}</h1>
     <p class="subtitle">
-      Discover Standard.site writing based on what you like on Bluesky.
+      ${variant.copy.tagline}
     </p>
 
     <div class="search-wrap">
@@ -453,7 +461,7 @@ export const enrollPage = `<!DOCTYPE html>
         <input
           type="text"
           id="handle-input"
-          placeholder="Start typing your handle…"
+          placeholder="${variant.copy.placeholder}"
           autocomplete="off"
           spellcheck="false"
         />
@@ -474,7 +482,7 @@ export const enrollPage = `<!DOCTYPE html>
       <svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor">
         <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/>
       </svg>
-      <a href="https://standard.site">Powered by Standard.site</a>
+      <a href="https://standard.site">${variant.copy.footer}</a>
     </span>
     <span class="sep">&middot;</span>
     <a href="https://atproto.com">AT Protocol</a>
@@ -589,3 +597,4 @@ export const enrollPage = `<!DOCTYPE html>
   </script>
 </body>
 </html>`;
+}

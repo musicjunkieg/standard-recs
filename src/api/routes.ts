@@ -8,6 +8,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Env } from "../env.js";
+import { type Variant, variantFromHost } from "../variants.js";
 import { createOAuthClient, buildClientMetadata } from "../oauth/client.js";
 import { AtpAgent } from "@atproto/api";
 
@@ -22,14 +23,25 @@ import { enrollPage } from "./enroll-page.js";
 import { recsPage } from "./recs-page.js";
 import { recsLookupPage } from "./recs-lookup-page.js";
 
-const api = new Hono<{ Bindings: Env }>();
+const api = new Hono<{ Bindings: Env; Variables: { variant: Variant } }>();
 
 api.use("*", cors());
+
+// Variant routing middleware. Reads the Host header and stores the
+// matched Variant on the request context. Every downstream handler
+// reads it via c.get("variant") and doesn't need to know about
+// hostnames. Unknown hosts fall back to "standard" inside
+// variantFromHost so dev mode (localhost:8787) still works.
+api.use("*", async (c, next) => {
+  const variant = variantFromHost(c.req.header("host"));
+  c.set("variant", variant);
+  await next();
+});
 
 // ─── Public ───
 
 // Enrollment page
-api.get("/", (c) => c.html(enrollPage));
+api.get("/", (c) => c.html(enrollPage(c.get("variant"))));
 
 // API info
 api.get("/api", (c) => {
@@ -81,7 +93,7 @@ api.get("/enroll", async (c) => {
 });
 
 // Recs lookup page
-api.get("/recs", (c) => c.html(recsLookupPage));
+api.get("/recs", (c) => c.html(recsLookupPage(c.get("variant"))));
 
 // Resolve handle → DID and redirect to recs page
 api.get("/recs/by-handle/:handle", async (c) => {
@@ -94,7 +106,7 @@ api.get("/recs/by-handle/:handle", async (c) => {
     .first<{ did: string }>();
 
   if (!user) {
-    return c.html(recsPage({ state: "not_found" }), 404);
+    return c.html(recsPage({ state: "not_found", variant: c.get("variant") }), 404);
   }
 
   return c.redirect(`/recs/${user.did}`);
@@ -103,6 +115,7 @@ api.get("/recs/by-handle/:handle", async (c) => {
 // Get recommendations for a user (content-negotiated: HTML for browsers, JSON for API)
 api.get("/recs/:did", async (c) => {
   const did = c.req.param("did");
+  const variant = c.get("variant");
   const wantsHtml = c.req.header("Accept")?.includes("text/html");
 
   const user = await c.env.DB.prepare(
@@ -113,11 +126,32 @@ api.get("/recs/:did", async (c) => {
 
   if (!user) {
     if (wantsHtml) {
-      return c.html(recsPage({ state: "not_found" }), 404);
+      return c.html(recsPage({ state: "not_found", variant: c.get("variant") }), 404);
     }
     return c.json({ error: "User not enrolled" }, 404);
   }
 
+  if (variant.ranking.kind === "placeholder") {
+    if (wantsHtml) {
+      return c.html(recsPage({ state: "placeholder", variant }));
+    }
+    return c.json({
+      did: user.did,
+      handle: user.handle,
+      variant: variant.key,
+      state: "placeholder",
+      message: "Recommendations for this variant aren't available yet.",
+      recommendations: [],
+    });
+  }
+
+  // ORDER BY r.rank ASC, not r.score DESC: for standard, rank is the
+  // top-N cosine ordering (equivalent to score DESC), but for
+  // nonstandard, rank preserves the MMR greedy pick order (first pick
+  // = most confident diversity-aware match, last pick = biggest stretch).
+  // Sorting by raw score would scramble the nonstandard list into a
+  // "next 12 by cosine" ranking, discarding the information MMR
+  // encoded in the pick order itself.
   const { results: recs } = await c.env.DB.prepare(
     `SELECT r.document_uri, r.score, r.generated_at,
             d.title, d.description, d.site, d.path, d.tags, d.published_at,
@@ -125,10 +159,10 @@ api.get("/recs/:did", async (c) => {
      FROM recommendations r
      JOIN documents d ON r.document_uri = d.uri
      LEFT JOIN publications p ON d.site = p.uri
-     WHERE r.did = ?
-     ORDER BY r.score DESC`,
+     WHERE r.did = ? AND r.variant = ?
+     ORDER BY r.rank ASC`,
   )
-    .bind(did)
+    .bind(did, variant.key)
     .all();
 
   if (wantsHtml) {
@@ -137,6 +171,7 @@ api.get("/recs/:did", async (c) => {
         state: "found",
         handle: user.handle,
         did: user.did,
+        variant: c.get("variant"),
         recs: recs.map((r: Record<string, unknown>) => ({
           uri: r.document_uri as string,
           score: r.score as number,
@@ -262,8 +297,125 @@ api.post("/admin/compare-recs", async (c) => {
   }
 
   const topN = parseInt(c.env.TOP_N ?? "10", 10) || 10;
+  const variantsParam = c.req.query("variants");
 
-  const [queryRecs, docRecs] = await Promise.all([
+  // New branch: variant comparison — triggered by ?variants=standard,nonstandard
+  // (or any subset). One generateUserRecommendations call returns both variants
+  // after the Task 6 refactor; we just filter by .variant here.
+  if (variantsParam) {
+    const requestedVariants = variantsParam
+      .split(",")
+      .map((v) => v.trim())
+      .filter((v): v is "standard" | "nonstandard" =>
+        v === "standard" || v === "nonstandard",
+      );
+
+    if (requestedVariants.length === 0) {
+      return c.json(
+        { error: "variants param must include 'standard' and/or 'nonstandard'" },
+        400,
+      );
+    }
+
+    const rawLambda = parseFloat(c.env.MMR_LAMBDA ?? "0.6");
+    const lambda =
+      Number.isFinite(rawLambda) && rawLambda >= 0 && rawLambda <= 1
+        ? rawLambda
+        : 0.6;
+
+    const likesNamespace =
+      c.env.LIKE_QUERY_NAMESPACE === "likes_doc" ? "likes_doc" : "likes";
+
+    const allRecs = await generateUserRecommendations(
+      c.env.DB,
+      c.env.VECTORS,
+      did,
+      topN,
+      likesNamespace,
+      true, // dryRun — don't touch D1
+      lambda,
+    );
+
+    // Collect all unique document URIs across all requested variants for
+    // a single enrichment query.
+    const variantBuckets: Record<string, typeof allRecs> = {};
+    for (const v of requestedVariants) {
+      variantBuckets[v] = allRecs.filter((r) => r.variant === v);
+    }
+
+    const allUris = Array.from(
+      new Set(
+        Object.values(variantBuckets)
+          .flat()
+          .map((r) => r.document_uri),
+      ),
+    );
+
+    type DocRow = {
+      uri: string;
+      title: string;
+      description: string | null;
+      site: string | null;
+      path: string | null;
+      publication_url: string | null;
+      publication_name: string | null;
+    };
+
+    let docs: DocRow[] = [];
+    if (allUris.length > 0) {
+      const placeholders = allUris.map(() => "?").join(",");
+      const result = await c.env.DB.prepare(
+        `SELECT d.uri, d.title, d.description, d.site, d.path,
+                p.url AS publication_url, p.name AS publication_name
+         FROM documents d
+         LEFT JOIN publications p ON d.site = p.uri
+         WHERE d.uri IN (${placeholders})`,
+      )
+        .bind(...allUris)
+        .all<DocRow>();
+      docs = result.results;
+    }
+
+    const docMap = new Map(docs.map((d) => [d.uri, d]));
+
+    const enrichRec = (rec: { document_uri: string; score: number }) => {
+      const d = docMap.get(rec.document_uri);
+      return {
+        uri: rec.document_uri,
+        score: rec.score,
+        title: d?.title ?? null,
+        description: d?.description ?? null,
+        url: buildDocumentUrl(
+          d?.publication_url ?? null,
+          d?.site ?? null,
+          d?.path ?? null,
+        ),
+        site:
+          d?.publication_name ??
+          extractHostname(d?.publication_url ?? null) ??
+          extractHostname(d?.site ?? null) ??
+          null,
+      };
+    };
+
+    const enrichedVariants: Record<string, ReturnType<typeof enrichRec>[]> = {};
+    for (const v of requestedVariants) {
+      enrichedVariants[v] = variantBuckets[v].map(enrichRec);
+    }
+
+    return c.json({ did, lambda, topN, variants: enrichedVariants });
+  }
+
+  // Existing branch: namespace comparison (supports PR #18 usage).
+  //
+  // Note: after Task 6's refactor, generateUserRecommendations returns
+  // BOTH variants (standard + nonstandard) in one call, so each of the
+  // two calls below returns 2 * topN rows. The legacy PR #18 response
+  // shape is "top-N per namespace," matching the standard ranking
+  // (top-N by raw cosine). Filter each call's result to just the
+  // .variant === "standard" rows before enrichment so the response
+  // shape stays exactly what PR #18 consumers expect.
+  const [allQueryRecs, allDocRecs] = await Promise.all([
     generateUserRecommendations(
       c.env.DB,
       c.env.VECTORS,
@@ -281,6 +433,8 @@ api.post("/admin/compare-recs", async (c) => {
       true, // dryRun
     ),
   ]);
+  const queryRecs = allQueryRecs.filter((r) => r.variant === "standard");
+  const docRecs = allDocRecs.filter((r) => r.variant === "standard");
 
   // Enrich each rec with document metadata. Mirrors the join the public
   // /recs/:did route uses: documents has no `url` column — the resolved

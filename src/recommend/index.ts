@@ -14,11 +14,22 @@ import {
   LIKES_NAMESPACE_DOC,
   LIKES_DOC_ID_PREFIX,
 } from "./embed.js";
+import { pickMMR } from "./mmr.js";
 
 type Recommendation = {
   did: string;
   document_uri: string;
   score: number;
+  variant: "standard" | "nonstandard";
+  /**
+   * Zero-indexed position within this variant's list, preserving the
+   * algorithm's original pick order. For standard this is just top-N by
+   * raw cosine. For nonstandard this is the MMR greedy pick order:
+   * rank 0 = first pick (no diversity penalty), rank k = pick after
+   * penalizing for similarity to picks 0..k-1. Sorting by score DESC
+   * would scramble the nonstandard order into a different ranking.
+   */
+  rank: number;
 };
 
 /**
@@ -29,6 +40,7 @@ export async function generateAllRecommendations(
   vectors: VectorizeIndex,
   topN: number,
   likesNamespace: string = LIKES_NAMESPACE_QUERY,
+  lambda: number = 0.6,
 ): Promise<number> {
   const { results: users } = await db
     .prepare(`SELECT did FROM users`)
@@ -44,6 +56,8 @@ export async function generateAllRecommendations(
         user.did,
         topN,
         likesNamespace,
+        false,    // dryRun — workflow path always persists
+        lambda,
       );
       totalRecs += recs.length;
     } catch (err) {
@@ -64,6 +78,7 @@ export async function generateUserRecommendations(
   topN: number,
   likesNamespace: string = LIKES_NAMESPACE_QUERY,
   dryRun: boolean = false,
+  lambda: number = 0.6,
 ): Promise<Recommendation[]> {
   // 1. Get this user's like URIs from D1 (ordered by recency)
   const { results: likes } = await db
@@ -112,47 +127,123 @@ export async function generateUserRecommendations(
   const tasteVector = computeTasteVector(likeVectors, likeHashToTimestamp);
 
   // 4. Query Vectorize for nearest documents.
-  // returnMetadata must be "all" (not "indexed") because the uri field
-  // is stored in metadata but not registered as a metadata index.
-  // "all" limits topK to 50 per Cloudflare docs. Clamp to stay under.
-  const topK = Math.min(topN * 2, 50);
+  // Fixed topK=50 (Vectorize per-query cap with returnMetadata="all").
+  // returnValues=true is required so pickMMR can do pairwise vector
+  // comparisons for the nonstandard diversity term. ~250KB per user
+  // per cron — fine at any reasonable scale.
+  const CANDIDATE_POOL = 50;
+
+  // Sanity check: the nonstandard MMR pool is whatever's left after
+  // the standard top-N is claimed, i.e., CANDIDATE_POOL - topN. If
+  // someone bumps TOP_N above CANDIDATE_POOL / 2, the nonstandard
+  // list silently underfills. Today TOP_N defaults to 12, leaving 38
+  // slots — generous. Warn loudly if the ratio inverts so the
+  // operator knows why nonstandard recs are short.
+  if (topN * 2 > CANDIDATE_POOL) {
+    console.warn(
+      `generateUserRecommendations: TOP_N=${topN} leaves only ${CANDIDATE_POOL - topN} ` +
+        `candidates for nonstandard MMR (pool=${CANDIDATE_POOL}). Bump CANDIDATE_POOL ` +
+        `or drop TOP_N for richer nonstandard recs.`,
+    );
+  }
+
   const matches = await vectors.query(tasteVector, {
-    topK,
+    topK: CANDIDATE_POOL,
     namespace: "documents",
-    returnValues: false,
+    returnValues: true,
     returnMetadata: "all",
   });
 
-  // 5. Store top-N in D1 — match.id is a hash, so read the original URI
-  // from metadata. Filter THEN slice so we always get up to topN valid recs.
-  const recs: Recommendation[] = matches.matches
-    .filter((match) => {
-      const uri = (match.metadata as { uri?: string } | null)?.uri;
-      return !!uri;
-    })
-    .slice(0, topN)
-    .map((match) => ({
-      did,
-      document_uri: (match.metadata as { uri: string }).uri,
-      score: match.score,
-    }));
+  // 5a. Filter to valid matches (those with a uri in metadata).
+  const validMatches = matches.matches.filter((match) => {
+    const uri = (match.metadata as { uri?: string } | null)?.uri;
+    return !!uri;
+  });
+
+  // 5b. Standard recs: top-N by raw cosine, same as before.
+  const standardMatches = validMatches.slice(0, topN);
+  const standardRecs: Recommendation[] = standardMatches.map((match, i) => ({
+    did,
+    document_uri: (match.metadata as { uri: string }).uri,
+    score: match.score,
+    variant: "standard" as const,
+    rank: i,
+  }));
+
+  // 5c. Nonstandard recs: MMR over the tail of the candidate pool
+  // (indices topN onward), with the standard top-N as the seed set
+  // (diversify against what standard already picked).
+  //
+  // LOAD-BEARING: The `validMatches.slice(topN)` split ensures
+  // standard and nonstandard variants for the same user NEVER share
+  // a document_uri. This is required because the `recommendations`
+  // PK is (did, document_uri) without a `variant` column — if the
+  // two variants ever produced the same doc, the D1 INSERT would
+  // fail with a UNIQUE constraint violation. Any future variant that
+  // re-ranks over the full validMatches must either (a) preserve this
+  // disjointness invariant or (b) update the schema PK first.
+  // See: docs/superpowers/specs/2026-04-13-recs-variants-design.md
+  //
+  // L2-normalize the taste vector before feeding it to MMR: the
+  // Voyage embeddings in `validMatches` are already unit vectors, so
+  // pickMMR's diversity term `dot(cVec, p.values!)` produces true
+  // cosines in [-1, 1]. But `computeTasteVector` returns a weighted
+  // *average* (not a unit vector), so `dot(cVec, tasteVector)` would
+  // be scaled by |tasteVector| — typically 0.5-0.9 for likes spanning
+  // multiple topics. That scale mismatch compresses the relevance
+  // term relative to the diversity penalty, skewing MMR's balance
+  // away from the intended lambda. Normalize here so both terms live
+  // on the same [-1, 1] cosine scale. (Vectorize's own query() call
+  // above doesn't need this because Cloudflare handles the scaling
+  // internally for cosine similarity ordering.)
+  const tasteVectorNormalized = normalizeL2(tasteVector);
+  const nonstandardMatches = pickMMR(
+    validMatches.slice(topN),
+    standardMatches,
+    tasteVectorNormalized,
+    topN,
+    lambda,
+  );
+  // The .map index IS the MMR pick order because pickMMR returns
+  // winners in selection order (first pick = rank 0, second pick =
+  // rank 1, etc.). Persist this as the `rank` column so the read path
+  // can ORDER BY rank ASC and preserve MMR's greedy decisions.
+  const nonstandardRecs: Recommendation[] = nonstandardMatches.map((match, i) => ({
+    did,
+    document_uri: (match.metadata as { uri: string }).uri,
+    score: match.score,
+    variant: "nonstandard" as const,
+    rank: i,
+  }));
+
+  const recs: Recommendation[] = [...standardRecs, ...nonstandardRecs];
 
   if (recs.length > 0 && !dryRun) {
-    // Clear old recs and insert new ones
+    // Clear all existing variants for this user, then insert the new ones.
+    // The single DELETE wipes both standard and nonstandard in one statement
+    // so the writer doesn't need to know which variants exist.
     const stmts: D1PreparedStatement[] = [
       db.prepare(`DELETE FROM recommendations WHERE did = ?`).bind(did),
       ...recs.map((r) =>
         db
           .prepare(
-            `INSERT INTO recommendations (did, document_uri, score) VALUES (?, ?, ?)`,
+            `INSERT INTO recommendations (did, document_uri, score, variant, rank) VALUES (?, ?, ?, ?, ?)`,
           )
-          .bind(r.did, r.document_uri, r.score),
+          .bind(r.did, r.document_uri, r.score, r.variant, r.rank),
       ),
     ];
     await db.batch(stmts);
   }
 
-  console.log(`  ${did}: ${recs.length} recommendations generated`);
+  console.log(
+    `  ${did}: ${standardRecs.length} standard + ${nonstandardRecs.length} nonstandard recommendations generated`,
+  );
+  if (nonstandardRecs.length < topN) {
+    console.warn(
+      `  ${did}: nonstandard recs short (${nonstandardRecs.length}/${topN}) — ` +
+      `validMatches=${validMatches.length}, CANDIDATE_POOL=${CANDIDATE_POOL}`,
+    );
+  }
   return recs;
 }
 
@@ -199,4 +290,25 @@ function computeTasteVector(
   }
 
   return Array.from(sum);
+}
+
+/**
+ * L2-normalize a vector to unit length. Returns the original vector
+ * unchanged if its norm is zero (degenerate case — shouldn't happen
+ * in practice because `computeTasteVector` rejects vectors with zero
+ * total weight, but defensive).
+ *
+ * Used before passing the taste vector into MMR, so the relevance
+ * term `dot(cVec, taste)` produces true cosines matching the
+ * diversity term's `dot(cVec, picked)` scale. See the call site in
+ * `generateUserRecommendations` for the full rationale.
+ */
+function normalizeL2(v: number[]): number[] {
+  let sum = 0;
+  for (let i = 0; i < v.length; i++) sum += v[i] * v[i];
+  const norm = Math.sqrt(sum);
+  if (norm === 0) return v;
+  const out = new Array<number>(v.length);
+  for (let i = 0; i < v.length; i++) out[i] = v[i] / norm;
+  return out;
 }

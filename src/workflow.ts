@@ -47,6 +47,11 @@ function parseIntOrDefault(value: string | undefined, fallback: number): number 
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseMmrLambda(value: string | undefined): number {
+  const raw = parseFloat(value ?? "0.6");
+  return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.6;
+}
+
 export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
   async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep) {
     const params = event.payload;
@@ -111,8 +116,9 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
 
       await step.do(`recommend-for-user-${did}`, async () => {
         const likesNamespace = parseLikesNamespace(this.env.LIKE_QUERY_NAMESPACE);
+        const lambda = parseMmrLambda(this.env.MMR_LAMBDA);
         const recs = await generateUserRecommendations(
-          this.env.DB, this.env.VECTORS, did, topN, likesNamespace,
+          this.env.DB, this.env.VECTORS, did, topN, likesNamespace, false, lambda,
         );
         return { count: recs.length };
       });
@@ -190,7 +196,8 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       // Step 6: Generate recommendations
       const recCount = await step.do("recommend", async () => {
         const likesNamespace = parseLikesNamespace(this.env.LIKE_QUERY_NAMESPACE);
-        return await generateAllRecommendations(this.env.DB, this.env.VECTORS, topN, likesNamespace);
+        const lambda = parseMmrLambda(this.env.MMR_LAMBDA);
+        return await generateAllRecommendations(this.env.DB, this.env.VECTORS, topN, likesNamespace, lambda);
       });
 
       console.log(`Recommendations: ${recCount} total`);
