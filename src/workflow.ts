@@ -68,10 +68,19 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
 
     console.log(`User ${did}: ${likeResult.stored} likes synced`);
 
-    // Discovery + batched document sync
-    await step.do(`discover-${did}`, async () => {
-      return await runDiscovery(this.env.DB);
-    });
+    // Discovery + batched document sync. Explicit step config overrides the
+    // 10-minute default timeout + 5 retries so a stuck attempt fails in a
+    // few minutes instead of ~64 (see fix/discover-batched-inserts).
+    await step.do(
+      `discover-${did}`,
+      {
+        retries: { limit: 2, delay: "30 seconds", backoff: "exponential" },
+        timeout: "20 minutes",
+      },
+      async () => {
+        return await runDiscovery(this.env.DB);
+      },
+    );
 
     const syncStatus = await this.runBatchedDocumentSync(step, `user-${did}`);
 
@@ -136,10 +145,20 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       return result.meta.changes ?? 0;
     });
 
-    // Step 3: Discover publishers (lightrail + social graph) in its own step
-    const discovery = await step.do("discover", async () => {
-      return await runDiscovery(this.env.DB);
-    });
+    // Step 3: Discover publishers (lightrail + social graph) in its own step.
+    // Explicit step config overrides the 10-minute default timeout + 5
+    // retries so a stuck attempt fails in a few minutes instead of ~64
+    // (see fix/discover-batched-inserts).
+    const discovery = await step.do(
+      "discover",
+      {
+        retries: { limit: 2, delay: "30 seconds", backoff: "exponential" },
+        timeout: "20 minutes",
+      },
+      async () => {
+        return await runDiscovery(this.env.DB);
+      },
+    );
 
     console.log(`Discovery: ${discovery.discovered} new publishers (${discovery.errors} errors)`);
 

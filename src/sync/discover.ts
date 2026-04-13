@@ -89,27 +89,51 @@ export async function seedPublishers(db: D1Database): Promise<number> {
  * @returns The number of publisher DIDs that were newly inserted into the `publishers` table during this run
  */
 export async function discoverViaLightrail(db: D1Database): Promise<number> {
+  // Buffer DIDs and flush via db.batch() — a per-row INSERT was the dominant
+  // cost of this step (one D1 round-trip per row × ~20k rows blew the
+  // default 10-minute Workflow step timeout). Batching collapses that to one
+  // round-trip per BATCH_SIZE rows.
+  const BATCH_SIZE = 100;
   let discovered = 0;
+  const buffer: string[] = [];
+
+  const flush = async () => {
+    if (buffer.length === 0) return;
+    const stmts = buffer.map((did) =>
+      db
+        .prepare(`INSERT OR IGNORE INTO publishers (did, label) VALUES (?, ?)`)
+        .bind(did, "auto:lightrail"),
+    );
+    try {
+      const results = await db.batch(stmts);
+      for (const r of results) {
+        if ((r.meta?.changes ?? 0) > 0) discovered++;
+      }
+    } catch (batchErr) {
+      // INSERT OR IGNORE suppresses uniqueness violations, so a batch failure
+      // here is genuinely transient (D1 unavailable, etc.). Drop this batch
+      // and let the next cron pick the rows up — losing ~100 rows worst case
+      // is fine since lightrail's index is stable across runs.
+      console.error(
+        `discoverViaLightrail batch insert failed (${buffer.length} rows):`,
+        batchErr,
+      );
+    }
+    buffer.length = 0;
+  };
 
   try {
     for await (const did of listReposByCollection(PUBLICATION_COLLECTION)) {
-      // Per-iteration try/catch: a single failed insert must not abort the
-      // whole lightrail stream. Keep the outer try around the iterator only.
-      try {
-        const result = await db
-          .prepare(
-            `INSERT OR IGNORE INTO publishers (did, label) VALUES (?, ?)`,
-          )
-          .bind(did, "auto:lightrail")
-          .run();
-        if ((result.meta.changes ?? 0) > 0) discovered++;
-      } catch (insertErr) {
-        console.error(`discoverViaLightrail insert failed for ${did}:`, insertErr);
-        continue;
+      buffer.push(did);
+      if (buffer.length >= BATCH_SIZE) {
+        await flush();
       }
     }
+    await flush();
   } catch (err) {
     console.error("discoverViaLightrail stream failed:", err);
+    // Best-effort: try to flush whatever's already buffered before bailing.
+    await flush();
   }
 
   return discovered;
