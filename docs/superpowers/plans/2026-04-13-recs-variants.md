@@ -1291,10 +1291,13 @@ Confirm:
 - One new import at the top (`type Variant`).
 - Top-level declaration changed from `const` to `function` with a closing `}` at the end.
 - `:root` block has 5 new `--variant-*` custom properties at the top, driven by `${variant.brand.*}`.
-- Four `.blob--N` rules reference `var(--variant-blob-N)` instead of hardcoded hex.
-- Any brand-accent references (focus rings, chips) reference `var(--variant-brand)`.
-- Four inline strings replaced with `${variant.copy.*}` interpolations.
+- Four named `.blob--*` rules (`--amber`, `--blue`, `--violet`, `--center`) have their `radial-gradient` `rgba(...)` color values replaced with `var(--variant-blob-N)`. No other CSS rules should have changed.
+- `.glass-shape--*` tint rules are **untouched** (they use neutral-ish accent rgba and don't move with variant).
+- Focus ring / match-score chip / card hover shadow colors are **untouched** (same reason — neutral accent tones).
+- Four inline strings replaced with `${variant.copy.*}` interpolations (title, tagline, placeholder, footer).
 - No other changes to markup structure, script tags, or event handlers.
+
+(The `--variant-brand` custom property is injected into `:root` in Step 4 for future use but nothing in this task consumes it yet. That's intentional — don't go hunting for `#d99566` or amber accent colors to retrofit with `var(--variant-brand)`.)
 
 - [ ] **Step 9: Commit**
 
