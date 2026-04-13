@@ -33,6 +33,10 @@ export function parseEmbedMode(raw: string | undefined): LikeEmbedMode {
   return "query";
 }
 
+export function parseLikesNamespace(raw: string | undefined): string {
+  return raw === LIKES_NAMESPACE_DOC ? LIKES_NAMESPACE_DOC : LIKES_NAMESPACE_QUERY;
+}
+
 type EmbedResult = {
   likes: number;
   documents: number;

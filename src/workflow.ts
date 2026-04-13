@@ -20,7 +20,7 @@ import type { Env } from "./env.js";
 import { syncUserLikes, syncAllLikes, pruneStaleLikes } from "./sync/likes.js";
 import { syncDocumentsBatch } from "./sync/documents.js";
 import { runDiscovery } from "./sync/discover.js";
-import { embedAll, parseEmbedMode } from "./recommend/embed.js";
+import { embedAll, parseEmbedMode, parseLikesNamespace } from "./recommend/embed.js";
 import { generateAllRecommendations, generateUserRecommendations } from "./recommend/index.js";
 
 export type SyncParams =
@@ -34,10 +34,6 @@ const DEFAULT_SYNC_DOCS_MAX_BATCHES = 300;
 function parseIntOrDefault(value: string | undefined, fallback: number): number {
   const parsed = parseInt(value ?? "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function parseLikesNamespace(value: string | undefined): string {
-  return value === "likes_doc" ? "likes_doc" : "likes";
 }
 
 export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
