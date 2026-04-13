@@ -89,7 +89,8 @@ CREATE TABLE IF NOT EXISTS likes (
 
 CREATE INDEX IF NOT EXISTS idx_likes_did ON likes(did);
 CREATE INDEX IF NOT EXISTS idx_likes_liked_at ON likes(liked_at);
-CREATE INDEX IF NOT EXISTS idx_likes_embedded_at ON likes(embedded_at);
+CREATE INDEX IF NOT EXISTS idx_likes_unembedded
+  ON likes(liked_at DESC) WHERE embedded_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS documents (
   uri TEXT PRIMARY KEY,
@@ -106,12 +107,13 @@ CREATE TABLE IF NOT EXISTS documents (
 );
 
 CREATE INDEX IF NOT EXISTS idx_documents_published ON documents(published_at);
-CREATE INDEX IF NOT EXISTS idx_documents_embedded_at ON documents(embedded_at);
+CREATE INDEX IF NOT EXISTS idx_documents_unembedded
+  ON documents(indexed_at) WHERE embedded_at IS NULL;
 ```
 
 **`embedded_at` is nullable with no DEFAULT** because "never embedded" has no sensible default value; `NULL` is the natural signal.
 
-**The two new indexes** are necessary because the `WHERE embedded_at IS NULL` predicate would otherwise full-scan the tables. SQLite uses indexes for `IS NULL` lookups, so the partial selectivity makes the filtered SELECT fast even on 13k-row tables. If profiling ever shows the SELECT dominating cron wall-clock, we can revisit.
+**The two new indexes are partial indexes** — they only include rows matching `WHERE embedded_at IS NULL`. This is strictly tighter than a full index on `embedded_at`: during the initial backfill they hold all ~934 + ~13,334 rows, but as the backlog drains they shrink toward zero entries, and in steady state they're near-empty (just the handful of rows added since the previous cron). The likes index includes `liked_at DESC` as the sort key to support the `ORDER BY liked_at DESC` in the SELECT; the documents index includes `indexed_at` for predictable iteration order (though the SELECT has no explicit ORDER BY). SQLite's partial index support is native and D1 passes it through directly. If profiling later shows any issue, the fallback is a plain index on `embedded_at`.
 
 **Historical ad-hoc migrations applied to production:**
 
@@ -119,8 +121,10 @@ CREATE INDEX IF NOT EXISTS idx_documents_embedded_at ON documents(embedded_at);
 -- applied 2026-04-13 via wrangler d1 execute --remote --command=...
 ALTER TABLE likes ADD COLUMN embedded_at TEXT;
 ALTER TABLE documents ADD COLUMN embedded_at TEXT;
-CREATE INDEX IF NOT EXISTS idx_likes_embedded_at ON likes(embedded_at);
-CREATE INDEX IF NOT EXISTS idx_documents_embedded_at ON documents(embedded_at);
+CREATE INDEX IF NOT EXISTS idx_likes_unembedded
+  ON likes(liked_at DESC) WHERE embedded_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_documents_unembedded
+  ON documents(indexed_at) WHERE embedded_at IS NULL;
 ```
 
 These are recorded as comments at the bottom of `schema.sql` under the existing "Migration history" section, extending the pattern PR #21 established for the `variant` and `rank` columns.
@@ -191,26 +195,91 @@ const { results: docs } = await db
 
 The documents SELECT has no explicit `ORDER BY`, matching the existing behavior (stable table order for the initial batch). No need to change.
 
-**Inside `embedLikesIntoNamespace`** (the private helper that does the per-batch Voyage call + Vectorize upsert for likes), after the successful `await vectors.upsert(vectorBatch);` line and before `embedded += batch.length;`:
+**Likes batch loop restructures to handle `LIKE_EMBED_MODE=both` correctly.** The existing `embedLikesIntoNamespace` helper has the per-batch loop internal to itself, which means in `both` mode it's called twice with the same rows — once per namespace. If the stamp goes inside the helper, the first call stamps and the second call might fail mid-batch, leaving rows stamped but absent from the second namespace. That breaks the invariant "embedded_at IS NOT NULL iff in Vectorize."
+
+**Fix: hoist the batch loop to `embedAll` so a single batch iteration covers all requested namespaces and stamps only after all upserts for that batch succeed.** The helper is either deleted or shrunk to a thin "one batch, one namespace" wrapper — probably the latter for readability.
+
+The new batch loop shape in `embedAll`, replacing the two `embedLikesIntoNamespace` calls:
 
 ```ts
-// Stamp the just-embedded rows so they don't re-embed on the next
-// cron. Must be inside the same try as the upsert above — if the
-// upsert succeeded, we're committed to marking the rows, and if the
-// stamp itself fails the row gets re-embedded next cron (idempotent
-// overwrite, zero harm).
-const placeholders = batch.map(() => "?").join(",");
-await db
-  .prepare(
-    `UPDATE likes SET embedded_at = datetime('now') WHERE uri IN (${placeholders})`,
-  )
-  .bind(...batch.map((l) => l.uri))
-  .run();
+// --- Likes (one or both namespaces depending on mode, with
+// per-batch stamping only after all requested namespaces succeed) ---
+const wantQuery = embedMode === "query" || embedMode === "both";
+const wantDoc = embedMode === "document" || embedMode === "both";
+
+if (unembeddedLikes.length > 0 && (wantQuery || wantDoc)) {
+  const batches = chunk(unembeddedLikes, BATCH_SIZE);
+
+  for (const batch of batches) {
+    try {
+      const texts = batch.map((l) => l.liked_post_text);
+      const baseIds = await vectorIds(batch.map((l) => l.uri));
+
+      if (wantQuery) {
+        const embeddings = await getEmbeddings(texts, apiKey, "query");
+        if (embeddings.length !== texts.length) {
+          throw new Error(
+            `Voyage returned ${embeddings.length} embeddings for ${texts.length} inputs (query namespace)`,
+          );
+        }
+        const vectorBatch: VectorizeVector[] = embeddings.map((values, i) => ({
+          id: baseIds[i],
+          values,
+          namespace: LIKES_NAMESPACE_QUERY,
+          metadata: { type: "like", uri: batch[i].uri },
+        }));
+        await vectors.upsert(vectorBatch);
+        queryEmbedCount += batch.length;
+      }
+
+      if (wantDoc) {
+        const embeddings = await getEmbeddings(texts, apiKey, "document");
+        if (embeddings.length !== texts.length) {
+          throw new Error(
+            `Voyage returned ${embeddings.length} embeddings for ${texts.length} inputs (doc namespace)`,
+          );
+        }
+        const vectorBatch: VectorizeVector[] = embeddings.map((values, i) => ({
+          id: LIKES_DOC_ID_PREFIX + baseIds[i],
+          values,
+          namespace: LIKES_NAMESPACE_DOC,
+          metadata: { type: "like", uri: batch[i].uri },
+        }));
+        await vectors.upsert(vectorBatch);
+        docEmbedCount += batch.length;
+      }
+
+      // All requested namespaces have successfully upserted this
+      // batch. Stamp the rows now so they don't re-embed next cron.
+      // Must be inside the same try as the upserts above — if any
+      // upsert threw, we never reach the stamp and the catch block
+      // leaves embedded_at NULL, preserving the invariant.
+      const placeholders = batch.map(() => "?").join(",");
+      await db
+        .prepare(
+          `UPDATE likes SET embedded_at = datetime('now') WHERE uri IN (${placeholders})`,
+        )
+        .bind(...batch.map((l) => l.uri))
+        .run();
+    } catch (err) {
+      errors += batch.length;
+      console.error(`Like embedding batch failed:`, truncErr(err));
+    }
+  }
+}
 ```
 
-**Same block inside the documents loop** in `embedAll`, inside the try, after the successful `vectors.upsert`:
+**The old `embedLikesIntoNamespace` helper is deleted.** Its logic (Voyage call, parity check, Vectorize upsert) moves inline into the loop above. The helper was intended to DRY up the two-namespace case, but the stamp invariant forces the two namespace calls to share a try block with the stamp — so keeping them in a separate function and trying to coordinate stamping across calls is strictly worse than inlining. The inlined version is ~50 lines; the helper was ~40 lines plus the two call sites.
+
+**Documents loop — same stamp pattern, simpler because there's only one namespace:**
+
+In the existing documents batch loop in `embedAll`, inside the try, after the successful `await vectors.upsert(vectorBatch);` line:
 
 ```ts
+// Stamp the just-embedded documents. Same rationale as the likes
+// stamp above: inside the try so upsert-success/stamp-skip can't
+// happen; the only racey window is stamp-UPDATE-fails-after-upsert-
+// succeeded which is benign (idempotent re-embed next cron).
 const placeholders = batch.map(() => "?").join(",");
 await db
   .prepare(
@@ -219,6 +288,8 @@ await db
   .bind(...batch.map((d) => d.uri))
   .run();
 ```
+
+(Documents only ever go to the `"documents"` namespace so there's no multi-namespace coordination — the stamp inside the existing try is already structurally safe.)
 
 **Log line at the bottom of `embedAll` is extended with the effective limit** so operators can tell at a glance whether the cap was binding:
 
@@ -367,9 +438,9 @@ After PR merge:
    npx wrangler d1 execute standard-recs-db --remote \
      --command="ALTER TABLE documents ADD COLUMN embedded_at TEXT"
    npx wrangler d1 execute standard-recs-db --remote \
-     --command="CREATE INDEX IF NOT EXISTS idx_likes_embedded_at ON likes(embedded_at)"
+     --command="CREATE INDEX IF NOT EXISTS idx_likes_unembedded ON likes(liked_at DESC) WHERE embedded_at IS NULL"
    npx wrangler d1 execute standard-recs-db --remote \
-     --command="CREATE INDEX IF NOT EXISTS idx_documents_embedded_at ON documents(embedded_at)"
+     --command="CREATE INDEX IF NOT EXISTS idx_documents_unembedded ON documents(indexed_at) WHERE embedded_at IS NULL"
    ```
    (Bryan runs these from his shell, not the sandbox — wrangler needs to write its log file to `~/Library/Preferences/.wrangler/` which the sandbox blocks.)
 3. `npm run deploy` — standard deploy. Bindings table should show the new env var.
@@ -412,7 +483,13 @@ If something goes catastrophically wrong:
 1. Revert the PR via GitHub UI or `git revert <merge-commit> && git push`.
 2. Redeploy: `npm run deploy`.
 3. The `embedded_at` columns stay on the tables harmlessly after revert — the reverted `embedAll` simply doesn't read or write them.
-4. To force re-embed everything on the next cron after rollback: `wrangler d1 execute standard-recs-db --remote --command="UPDATE likes SET embedded_at = NULL; UPDATE documents SET embedded_at = NULL"` (two separate statements if D1 doesn't like them combined).
+4. To force re-embed everything on the next cron after rollback, run the two UPDATEs as separate invocations (D1's `--command=` flag accepts a single statement per call):
+   ```bash
+   npx wrangler d1 execute standard-recs-db --remote \
+     --command="UPDATE likes SET embedded_at = NULL"
+   npx wrangler d1 execute standard-recs-db --remote \
+     --command="UPDATE documents SET embedded_at = NULL"
+   ```
 
 ### Known one-time cost
 
