@@ -65,6 +65,12 @@ async function embedLikesIntoNamespace(
       const texts = batch.map((l) => l.liked_post_text);
       const embeddings = await getEmbeddings(texts, apiKey, inputType);
 
+      if (embeddings.length !== texts.length) {
+        throw new Error(
+          `Voyage returned ${embeddings.length} embeddings for ${texts.length} inputs`,
+        );
+      }
+
       const baseIds = await vectorIds(batch.map((l) => l.uri));
       const ids = baseIds.map((h) => idPrefix + h);
 
@@ -168,6 +174,12 @@ export async function embedAll(
         });
 
         const embeddings = await getEmbeddings(texts, apiKey, "document");
+
+        if (embeddings.length !== texts.length) {
+          throw new Error(
+            `Voyage returned ${embeddings.length} embeddings for ${texts.length} inputs`,
+          );
+        }
 
         const ids = await vectorIds(batch.map((d) => d.uri));
         const vectorBatch: VectorizeVector[] = embeddings.map((values, i) => ({
