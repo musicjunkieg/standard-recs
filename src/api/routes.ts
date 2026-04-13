@@ -106,7 +106,7 @@ api.get("/recs/by-handle/:handle", async (c) => {
     .first<{ did: string }>();
 
   if (!user) {
-    return c.html(recsPage({ state: "not_found" }), 404);
+    return c.html(recsPage({ state: "not_found", variant: c.get("variant") }), 404);
   }
 
   return c.redirect(`/recs/${user.did}`);
@@ -125,7 +125,7 @@ api.get("/recs/:did", async (c) => {
 
   if (!user) {
     if (wantsHtml) {
-      return c.html(recsPage({ state: "not_found" }), 404);
+      return c.html(recsPage({ state: "not_found", variant: c.get("variant") }), 404);
     }
     return c.json({ error: "User not enrolled" }, 404);
   }
@@ -149,6 +149,7 @@ api.get("/recs/:did", async (c) => {
         state: "found",
         handle: user.handle,
         did: user.did,
+        variant: c.get("variant"),
         recs: recs.map((r: Record<string, unknown>) => ({
           uri: r.document_uri as string,
           score: r.score as number,

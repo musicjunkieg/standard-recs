@@ -7,6 +7,8 @@
  *   3. User not found → 404 with link to enroll
  */
 
+import type { Variant } from "../variants.js";
+
 type Rec = {
   uri: string;
   score: number;
@@ -16,9 +18,10 @@ type Rec = {
   site: string | null;
 };
 
-type RecsPageData =
-  | { state: "found"; handle: string; did: string; recs: Rec[] }
-  | { state: "not_found" };
+export type RecsPageData =
+  | { state: "found"; handle: string; did: string; recs: Rec[]; variant: Variant }
+  | { state: "not_found"; variant: Variant }
+  | { state: "placeholder"; variant: Variant };
 
 export function recsPage(data: RecsPageData): string {
   const metaRefresh =
@@ -31,12 +34,17 @@ export function recsPage(data: RecsPageData): string {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>standard-recs</title>${metaRefresh}
+  <title>${data.variant.copy.title}</title>${metaRefresh}
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Inter:wght@400;500&display=swap" rel="stylesheet" />
   <style>
     :root {
+      --variant-brand: ${data.variant.brand.hex};
+      --variant-blob-1: ${data.variant.brand.blobs[0]};
+      --variant-blob-2: ${data.variant.brand.blobs[1]};
+      --variant-blob-3: ${data.variant.brand.blobs[2]};
+      --variant-blob-4: ${data.variant.brand.blobs[3]};
       --paper: #f7f3eb;
       --ink: #3d342d;
       --ink-soft: #4a443f;
@@ -83,27 +91,27 @@ export function recsPage(data: RecsPageData): string {
 
     .blob--amber {
       width: 520px; height: 400px;
-      background: radial-gradient(circle, rgba(230, 180, 100, 0.55) 0%, rgba(230, 180, 100, 0) 70%);
+      background: radial-gradient(circle, var(--variant-blob-1) 0%, transparent 70%);
       top: -6%; left: -8%;
       animation-delay: 0s, 1.8s;
     }
     .blob--blue {
       width: 600px; height: 440px;
-      background: radial-gradient(circle, rgba(147, 197, 253, 0.5) 0%, rgba(147, 197, 253, 0) 70%);
+      background: radial-gradient(circle, var(--variant-blob-2) 0%, transparent 70%);
       top: -10%; right: -6%;
       animation-delay: 0.15s, 1.95s;
       animation-duration: 1.8s, 30s;
     }
     .blob--violet {
       width: 420px; height: 320px;
-      background: radial-gradient(circle, rgba(167, 139, 250, 0.32) 0%, rgba(167, 139, 250, 0) 70%);
+      background: radial-gradient(circle, var(--variant-blob-3) 0%, transparent 70%);
       bottom: -4%; left: 18%;
       animation-delay: 0.3s, 2.1s;
       animation-duration: 1.8s, 28s;
     }
     .blob--rose {
       width: 480px; height: 340px;
-      background: radial-gradient(circle, rgba(217, 137, 108, 0.34) 0%, rgba(217, 137, 108, 0) 70%);
+      background: radial-gradient(circle, var(--variant-blob-4) 0%, transparent 70%);
       bottom: 8%; right: -6%;
       animation-delay: 0.45s, 2.25s;
       animation-duration: 1.8s, 32s;
@@ -395,7 +403,7 @@ export function recsPage(data: RecsPageData): string {
         <svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor">
           <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/>
         </svg>
-        <a href="https://standard.site">Powered by Standard.site</a>
+        <a href="https://standard.site">${data.variant.copy.footer}</a>
       </span>
       <span class="sep">&middot;</span>
       <a href="https://atproto.com">AT Protocol</a>
@@ -419,13 +427,25 @@ export function recsPage(data: RecsPageData): string {
     </div>${close}`;
   }
 
+  if (data.state === "placeholder") {
+    return `${head}
+    <header class="hero">
+      <h1>${data.variant.copy.title}</h1>
+      <p class="subtitle">${data.variant.copy.tagline}</p>
+    </header>
+    <div class="empty-card">
+      <p>Recommendations for this variant aren't available yet.</p>
+      <p>Check back soon — we're still working on it.</p>
+    </div>${close}`;
+  }
+
   const { handle, recs } = data;
 
   if (recs.length === 0) {
     return `${head}
     <header class="hero">
-      <h1>Recs for <span class="handle">@${esc(handle)}</span></h1>
-      <p class="subtitle">Standard.site writing picked for your taste.</p>
+      <h1>${data.variant.copy.recsHeading(handle)}</h1>
+      <p class="subtitle">${data.variant.copy.tagline}</p>
     </header>
     <div class="empty-card">
       <p>We're syncing your likes — check back shortly.</p>
@@ -455,8 +475,8 @@ export function recsPage(data: RecsPageData): string {
 
   return `${head}
     <header class="hero">
-      <h1>Recs for <span class="handle">@${esc(handle)}</span></h1>
-      <p class="subtitle">Standard.site writing picked for your taste.</p>
+      <h1>${data.variant.copy.recsHeading(handle)}</h1>
+      <p class="subtitle">${data.variant.copy.tagline}</p>
     </header>
     <div class="grid">
 ${cards}
