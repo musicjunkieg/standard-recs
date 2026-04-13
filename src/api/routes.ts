@@ -252,8 +252,12 @@ api.post("/admin/sync-user/:did", async (c) => {
 });
 
 // Compare recommendations between the two like-embedding namespaces.
-// Sequential awaits — the second call's recs end up persisted in D1.
-api.get("/admin/compare-recs", async (c) => {
+//
+// POST, not GET — generateUserRecommendations writes the recs to D1
+// (DELETE + INSERT for the user). A side-effecty GET would let link
+// previewers, browser prefetching, and accidental address-bar visits
+// silently mutate state.
+api.post("/admin/compare-recs", async (c) => {
   const did = c.req.query("did");
   if (!did) {
     return c.json({ error: "missing did query param" }, 400);
@@ -261,6 +265,11 @@ api.get("/admin/compare-recs", async (c) => {
 
   const topN = parseInt(c.env.TOP_N ?? "10", 10) || 10;
 
+  // Sequential, not Promise.all: both calls write to D1, and the order
+  // matters. The second call (docRecs) wins, so after this endpoint runs
+  // the persisted recs for `did` are the document-namespace results.
+  // Do not reorder or parallelize without changing how persistence is
+  // handled (e.g., adding a dryRun flag to generateUserRecommendations).
   const queryRecs = await generateUserRecommendations(
     c.env.DB,
     c.env.VECTORS,
