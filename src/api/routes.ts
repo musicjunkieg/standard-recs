@@ -93,7 +93,7 @@ api.get("/enroll", async (c) => {
 });
 
 // Recs lookup page
-api.get("/recs", (c) => c.html(recsLookupPage));
+api.get("/recs", (c) => c.html(recsLookupPage(c.get("variant"))));
 
 // Resolve handle → DID and redirect to recs page
 api.get("/recs/by-handle/:handle", async (c) => {
