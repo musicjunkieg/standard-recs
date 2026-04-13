@@ -282,7 +282,9 @@ api.post("/admin/compare-recs", async (c) => {
     ),
   ]);
 
-  // Enrich each rec with the document metadata so the comparison is readable.
+  // Enrich each rec with document metadata. Mirrors the join the public
+  // /recs/:did route uses: documents has no `url` column — the resolved
+  // web URL is built from the publication's URL plus the document's path.
   const allUris = Array.from(
     new Set([...queryRecs, ...docRecs].map((r) => r.document_uri)),
   );
@@ -291,15 +293,21 @@ api.post("/admin/compare-recs", async (c) => {
     uri: string;
     title: string;
     description: string | null;
-    url: string | null;
     site: string | null;
+    path: string | null;
+    publication_url: string | null;
+    publication_name: string | null;
   };
 
   let docs: DocRow[] = [];
   if (allUris.length > 0) {
     const placeholders = allUris.map(() => "?").join(",");
     const result = await c.env.DB.prepare(
-      `SELECT uri, title, description, url, site FROM documents WHERE uri IN (${placeholders})`,
+      `SELECT d.uri, d.title, d.description, d.site, d.path,
+              p.url AS publication_url, p.name AS publication_name
+       FROM documents d
+       LEFT JOIN publications p ON d.site = p.uri
+       WHERE d.uri IN (${placeholders})`,
     )
       .bind(...allUris)
       .all<DocRow>();
@@ -315,8 +323,16 @@ api.post("/admin/compare-recs", async (c) => {
       score: rec.score,
       title: d?.title ?? null,
       description: d?.description ?? null,
-      url: d?.url ?? null,
-      site: d?.site ?? null,
+      url: buildDocumentUrl(
+        d?.publication_url ?? null,
+        d?.site ?? null,
+        d?.path ?? null,
+      ),
+      site:
+        d?.publication_name ??
+        extractHostname(d?.publication_url ?? null) ??
+        extractHostname(d?.site ?? null) ??
+        null,
     };
   };
 
