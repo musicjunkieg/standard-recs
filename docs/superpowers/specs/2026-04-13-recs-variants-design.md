@@ -394,12 +394,35 @@ pattern = "substandardrecs.site"
 custom_domain = true
 ```
 
-**Schema migration** (applied once via `npm run db:init`):
+**Schema state** — the `recommendations` table gains two new columns (`variant` and `rank`) and one new index (`idx_recs_did_variant`). `schema.sql` describes the final table shape directly in the `CREATE TABLE IF NOT EXISTS recommendations` statement, so a fresh database bootstrap via `npm run db:init` gets the columns without any ALTERs:
 
 ```sql
-ALTER TABLE recommendations ADD COLUMN variant TEXT NOT NULL DEFAULT 'standard';
+CREATE TABLE IF NOT EXISTS recommendations (
+  did TEXT NOT NULL,
+  document_uri TEXT NOT NULL,
+  score REAL NOT NULL,
+  variant TEXT NOT NULL DEFAULT 'standard',
+  rank INTEGER NOT NULL DEFAULT 0,
+  generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (did, document_uri),
+  FOREIGN KEY (did) REFERENCES users(did),
+  FOREIGN KEY (document_uri) REFERENCES documents(uri)
+);
+
 CREATE INDEX IF NOT EXISTS idx_recs_did_variant ON recommendations(did, variant);
 ```
+
+**For the existing production database**, the two columns were applied ad-hoc during PR development via:
+
+```sql
+-- applied 2026-04-13 via wrangler d1 execute --remote --command=...
+ALTER TABLE recommendations ADD COLUMN variant TEXT NOT NULL DEFAULT 'standard';
+ALTER TABLE recommendations ADD COLUMN rank INTEGER NOT NULL DEFAULT 0;
+```
+
+SQLite's `ALTER TABLE ADD COLUMN` is idempotent-unsafe — running it twice fails fast — so schema.sql doesn't try to re-apply them. A historical record of the migrations lives as comments at the bottom of schema.sql. No migration system: this project has a single production DB and infrequent schema changes. If that ever changes, move the history comments to a real `migrations/` directory with timestamped files and a tracking table.
+
+**Disjointness invariant** — the PK stays `(did, document_uri)` without a `variant` column. The nonstandard variant's MMR candidate pool is `validMatches.slice(topN)`, guaranteed disjoint from the standard top-N, so the two variants never produce the same `document_uri` for the same user. See the spec's Data Flow section and the load-bearing comment in `src/recommend/index.ts` for details.
 
 ## Testing and verification
 

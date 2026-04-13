@@ -36,15 +36,24 @@ CREATE TABLE IF NOT EXISTS documents (
 
 CREATE INDEX IF NOT EXISTS idx_documents_published ON documents(published_at);
 
+-- `variant` and `rank` were added in successive 2026-04-13 migrations;
+-- see the "Migration history" comment at the bottom of this file for
+-- how they were applied to the existing production database. A fresh
+-- database bootstrapped from this file gets the final shape directly
+-- via the CREATE TABLE statement below.
 CREATE TABLE IF NOT EXISTS recommendations (
   did TEXT NOT NULL,
   document_uri TEXT NOT NULL,
   score REAL NOT NULL,
+  variant TEXT NOT NULL DEFAULT 'standard',
+  rank INTEGER NOT NULL DEFAULT 0,
   generated_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (did, document_uri),
   FOREIGN KEY (did) REFERENCES users(did),
   FOREIGN KEY (document_uri) REFERENCES documents(uri)
 );
+
+CREATE INDEX IF NOT EXISTS idx_recs_did_variant ON recommendations(did, variant);
 
 -- Publishers are auto-discovered from users' social graphs.
 -- DIDs get added here automatically when the cron discovers that
@@ -82,22 +91,31 @@ CREATE TABLE IF NOT EXISTS oauth_sessions (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- 2026-04-13: Add variant column for the nonstandardrecs / substandardrecs
--- variant system. Existing rows default to 'standard' via the DEFAULT clause,
--- so there's no backfill step. The PK stays (did, document_uri); see the spec
--- for the disjointness invariant that keeps this safe across variants.
-ALTER TABLE recommendations ADD COLUMN variant TEXT NOT NULL DEFAULT 'standard';
-CREATE INDEX IF NOT EXISTS idx_recs_did_variant ON recommendations(did, variant);
-
--- 2026-04-13 round 3: Add rank column to preserve MMR pick order for
--- nonstandard recs. Without this, the read path's `ORDER BY score DESC`
--- re-sorts nonstandard picks by raw cosine, scrambling the deliberate
--- greedy ordering produced by pickMMR (first pick = best balance of
--- relevance vs diversity, last pick = biggest trust-us stretch). For
--- standard, pick order and score DESC order are identical, so this
--- column is a no-op for standard but load-bearing for nonstandard.
+-- ────────────────────────────────────────────────────────────────
+-- Migration history
+-- ────────────────────────────────────────────────────────────────
 --
--- Default 0 means pre-existing rows (all standard pre-refactor) get
--- rank=0 across the board — fine because they'll be re-written by
--- the next cron's generateUserRecommendations call anyway.
-ALTER TABLE recommendations ADD COLUMN rank INTEGER NOT NULL DEFAULT 0;
+-- This file describes the FINAL table shape. Fresh databases are
+-- bootstrapped directly via the CREATE TABLE IF NOT EXISTS statements
+-- above. For the existing production database, the migrations were
+-- applied ad-hoc via `wrangler d1 execute --remote --command=...`
+-- and are recorded here as historical reference only.
+--
+-- No migration system: this project has a single production DB and
+-- a small set of incremental schema changes. If the change cadence
+-- ever warrants it, move these to a real migrations/ directory with
+-- timestamped files and a tracking table. Not today.
+--
+--   2026-04-13 (nonstandardrecs variant system):
+--     ALTER TABLE recommendations ADD COLUMN variant TEXT NOT NULL DEFAULT 'standard';
+--     CREATE INDEX IF NOT EXISTS idx_recs_did_variant ON recommendations(did, variant);
+--
+--   2026-04-13 round 3 (preserve MMR pick order at read time):
+--     ALTER TABLE recommendations ADD COLUMN rank INTEGER NOT NULL DEFAULT 0;
+--
+-- If you're bootstrapping a new database, you DO NOT need to run the
+-- ALTER statements — the CREATE TABLE above already has the
+-- variant and rank columns. SQLite's ALTER TABLE ADD COLUMN is
+-- idempotent-unsafe (errors on duplicate column) so re-running these
+-- ALTERs against an already-migrated database fails fast, which is
+-- why they're in comments, not executable SQL.
