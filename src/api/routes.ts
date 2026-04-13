@@ -259,7 +259,7 @@ api.get("/admin/compare-recs", async (c) => {
     return c.json({ error: "missing did query param" }, 400);
   }
 
-  const topN = parseInt(c.env.TOP_N ?? "12", 10) || 12;
+  const topN = parseInt(c.env.TOP_N ?? "10", 10) || 10;
 
   const queryRecs = await generateUserRecommendations(
     c.env.DB,
