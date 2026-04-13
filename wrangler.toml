@@ -66,6 +66,7 @@ WORKER_URL = "https://standard-recs.bryan-78d.workers.dev"
 LIKE_EMBED_MODE = "query"
 LIKE_QUERY_NAMESPACE = "likes"
 MMR_LAMBDA = "0.6"
+EMBED_BATCH_LIMIT = "2000"
 
 # ─── Limits ───
 
