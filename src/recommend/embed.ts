@@ -57,6 +57,7 @@ export async function embedAll(
 ): Promise<EmbedResult> {
   let queryEmbedCount = 0;
   let docEmbedCount = 0;
+  let stampedLikes = 0;
   let docCount = 0;
   let errors = 0;
 
@@ -131,6 +132,7 @@ export async function embedAll(
           )
           .bind(...batch.map((l) => l.uri))
           .run();
+        stampedLikes += batch.length;
       } catch (err) {
         errors += batch.length;
         console.error(`Like embedding batch failed:`, truncErr(err));
@@ -201,9 +203,13 @@ export async function embedAll(
     }
   }
 
-  // Both branches process the same input rows, so the count of distinct
-  // likes touched in this run is whichever branch ran (or the max in "both").
-  const likesProcessed = Math.max(queryEmbedCount, docEmbedCount);
+  // likesProcessed reports fully committed (stamped) rows only. In
+  // LIKE_EMBED_MODE=both, a batch that succeeds in the query namespace
+  // but throws in the doc namespace never reaches the stamp — those
+  // rows stay NULL and re-embed next cron. Using stampedLikes (not
+  // Math.max of the per-namespace counts) means the returned count
+  // reflects actual committed state, not "any upsert succeeded."
+  const likesProcessed = stampedLikes;
   console.log(
     `Embedded ${likesProcessed} likes ` +
       `(query=${queryEmbedCount}, doc=${docEmbedCount}), ` +
