@@ -426,7 +426,7 @@ Two changes:
 
 - [ ] **Step 8: Add the stamp UPDATE inside the documents batch loop**
 
-Find the existing documents batch loop (the `for (const batch of batches)` block following the documents SELECT). Inside its `try`, after the existing `await vectors.upsert(vectorBatch);` line and after `docCount += batch.length;` (or wherever the count increment is), add:
+Find the existing documents batch loop (the `for (const batch of batches)` block following the documents SELECT). Inside its `try`, after both `await vectors.upsert(vectorBatch);` AND `docCount += batch.length;` — the stamp must be the last statement in the try, so put it at the very end of the try block immediately before the closing `}`:
 
 ```typescript
 // Stamp the just-embedded documents. Inside the try so upsert-
@@ -866,7 +866,7 @@ Expected: clean bundle, bindings table shows all env vars including `env.EMBED_B
 git log --oneline main..HEAD
 ```
 
-Expected: 5 commits (spec draft + 2 spec review rounds + 4 implementation commits from Tasks 1-4 above). Actually it's 7 total from the spec branch work:
+Expected: 7 commits on the branch — 3 spec commits (draft + 2 review rounds) + 4 implementation commits from Tasks 1-4:
 
 ```
 <hash> feat(config): add EMBED_BATCH_LIMIT env var (default 2000)
