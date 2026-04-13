@@ -101,6 +101,18 @@ api.use("*", async (c, next) => {
 });
 ```
 
+**The existing Hono type parameter must be expanded** so `c.set("variant", ...)` and `c.get("variant")` are type-safe:
+
+```ts
+// today
+const api = new Hono<{ Bindings: Env }>();
+
+// after
+const api = new Hono<{ Bindings: Env; Variables: { variant: Variant } }>();
+```
+
+Without the `Variables` map, TypeScript infers the variant context as `unknown` and the downstream handlers fail to typecheck on field access. Importing `Variant` from `../variants.js` into `routes.ts` is part of this task.
+
 Downstream handlers read the variant via `c.get("variant")`:
 
 ```ts
@@ -141,11 +153,12 @@ ALTER TABLE recommendations ADD COLUMN variant TEXT NOT NULL DEFAULT 'standard';
 CREATE INDEX IF NOT EXISTS idx_recs_did_variant ON recommendations(did, variant);
 ```
 
-Existing rows pick up `'standard'` via the default — no data loss, no backfill script. The PK stays `(did, document_uri)`:
+Existing rows pick up `'standard'` via the default — no data loss, no backfill script. The PK stays `(did, document_uri)` — **but this is load-bearing on an invariant every future ranking strategy must respect**:
 
-- MMR explicitly excludes the standard top-12 from the nonstandard candidate pool, so no document appears in both standard and nonstandard for the same user in the same run.
-- Anti-recs draw from the tail of the cosine ranking, disjoint from the top-12.
-- If a future variant wants overlap, revisit then. YAGNI.
+- MMR explicitly excludes the standard top-12 from the nonstandard candidate pool (via `candidates.slice(topN)` in `generateUserRecommendations`), so no document appears in both standard and nonstandard for the same user in the same run.
+- Anti-recs will draw from the tail of the cosine ranking, disjoint from the top-12.
+- **If a future `RankingStrategy` ever produces a document already in another variant for the same user, the INSERT will hit a PK conflict and fail.** The strategy author must guarantee disjointness, or this spec's PK decision must be revisited first (bump PK to `(did, document_uri, variant)`).
+- YAGNI says don't bump the PK preemptively, but any reviewer of a new strategy should check this invariant.
 
 The new index makes `SELECT ... WHERE did = ? AND variant = ?` cheap. Without it, every recs request would scan the user's whole rec history across all variants.
 
@@ -154,18 +167,21 @@ The new index makes `SELECT ... WHERE did = ? AND variant = ?` cheap. Without it
 1. Request arrives at Worker via one of the three routed hostnames.
 2. Hono middleware reads `host`, looks up the matching `Variant`, stores it on the request context.
 3. Route handler (`/`, `/recs/:did`, `/enroll`) reads `c.get("variant")`.
-4. For `/recs/:did`: SQL adds `WHERE r.variant = ?` bound to `variant.key`.
+4. For `/recs/:did`:
+   - If the user doesn't exist → `not_found` state. (unchanged behavior)
+   - Else if `variant.ranking.kind === "placeholder"` → `placeholder` state, skip the D1 SELECT entirely. (This is the substandardrecs case — there are no rows to fetch, and the page should render the placeholder-themed empty hero.)
+   - Else → SQL adds `WHERE r.variant = ?` bound to `variant.key`, and the result goes into `found` state. (If the SELECT returns zero rows, the recs page falls back to its existing "syncing, refresh in 30s" empty state — that's the pre-sync-complete case and is distinct from the `placeholder` case.)
 5. Page renderer (`enrollPage(variant)` or `recsPage({ ..., variant })`) interpolates variant copy and emits a `<style>:root { --variant-brand: …; --variant-blob-1: …; … }</style>` block so the theme applies.
 
 ### Data flow (cron time)
 
 1. Existing sync → embed → recommend pipeline runs.
 2. `generateUserRecommendations(user)` fetches taste vector (unchanged).
-3. Vectorize query — **changes**: `topK: 50` (was `Math.min(topN * 2, 50)`), `returnValues: true` (was `false`). The extra bandwidth is needed because MMR's pairwise similarity check needs the candidate vectors.
+3. Vectorize query — **changes**: `topK: 50` (was `Math.min(topN * 2, 50)`), `returnValues: true` (was `false`). The extra payload is needed because MMR's pairwise similarity check needs the candidate vectors. Combined response size with `returnMetadata: "all"` + `returnValues: true` at `topK=50`: roughly 200KB of vector data (50 × 1024 × 4 bytes) + maybe 50KB of document metadata ≈ **~250KB total**. Vectorize is a binding, not a subrequest, so the response lives in Worker memory (128MB default) — 250KB is rounding error. Still, **pre-deploy verification should explicitly assert the Vectorize response isn't truncated** by running the new query once against prod and confirming the returned array length is 50 and every match has `values` populated.
 4. Standard top-12 = first 12 valid matches by raw cosine (current behavior, just at the top of the 50-element list).
 5. Nonstandard top-12 = `pickMMR(candidates[12:], seed=standard[0:12], taste, k=12, lambda=0.6)`.
 6. Substandard: skipped (ranking strategy is `placeholder`).
-7. D1 batch: one `DELETE WHERE did = ?` wipes both variants, then `INSERT` rows for standard and nonstandard with explicit `variant` values.
+7. D1 batch: one `DELETE WHERE did = ?` wipes both variants, then `INSERT` rows for standard and nonstandard with explicit `variant` values. **Atomicity note:** if any step between the DELETE and the final batch commit throws, the user ends up with zero recs across both variants until the next cron. This is the same fragility the existing single-variant code already has, and we're not trying to fix it here — just noting it so a future planner doesn't accidentally "fix" the atomicity by restructuring the batch.
 8. Returns `{ standard: 12, nonstandard: 12 }`.
 
 ## MMR ranking
@@ -245,6 +261,8 @@ function dot(a: number[], b: number[]): number {
 const raw = parseFloat(env.MMR_LAMBDA ?? "0.6");
 const lambda = Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.6;
 ```
+
+**`topK: 50` coupling note.** The candidate pool size is hardcoded at 50 (the Vectorize per-query cap with `returnMetadata: "all"`). This implicitly assumes `TOP_N ≤ ~25` — today `TOP_N = 12`, leaving 38 candidates for the MMR pool, which is generous. If `TOP_N` is ever bumped above ~25, the MMR pool starves. Not a bug today, but worth a `topN * 2 <= 50` sanity check at pipeline-start and a note for anyone who touches `TOP_N` later.
 
 ## Theming
 
@@ -333,6 +351,7 @@ No changes to the middleware, the routing, the schema, the page templates, or th
 | `src/api/routes.ts` | modify | New variant middleware, `/recs/:did` SQL gains `WHERE variant = ?`, enroll and recs handlers call page renderers with `c.get("variant")` |
 | `src/api/enroll-page.ts` | modify | `enrollPage` becomes a function taking `Variant`, CSS refactor to use `--variant-*` custom properties, variant copy interpolated into template |
 | `src/api/recs-page.ts` | modify | `recsPage` becomes a function taking `Variant` via `RecsPageData`, new `placeholder` state, CSS refactor matching enroll-page |
+| `src/api/recs-lookup-page.ts` | modify | Accept `Variant` parameter, apply variant theme/copy so the lookup form doesn't feel like a standardrecs page on a nonstandardrecs.site visit. Minimal change (same template-function conversion as the other pages). |
 | `src/env.ts` | modify | New `MMR_LAMBDA: string` binding |
 | `schema.sql` | modify | `ALTER TABLE recommendations ADD COLUMN variant ...` + new index |
 | `wrangler.toml` | modify | Two new `[[routes]]` blocks, one new var `MMR_LAMBDA = "0.6"` |
@@ -403,7 +422,7 @@ Eyeball-compare the standard and nonstandard rec lists. The nonstandard list sho
 - Still feel plausibly connected to your taste (since λ=0.6 keeps relevance weighted).
 - Feel more spread-out across topics than the standard list (the whole point of MMR's diversity term).
 
-**Optional debugging:** extend `/admin/compare-recs` (already exists from PR #18) to accept `?variants=standard,nonstandard` so the same endpoint can compare variants side-by-side for a single DID. Useful for tuning λ post-launch without redeploying.
+**Strongly recommended follow-up (do this first after the PR lands):** extend `/admin/compare-recs` (already exists from PR #18) to accept `?variants=standard,nonstandard` so the same endpoint can compare variants side-by-side for a single DID. The `MMR_LAMBDA = 0.6` default is a guess — the only way to know if it's right is to compare rec lists at λ = 0.4, 0.5, 0.6, 0.7 against your own DID and pick the vibe. Without this extension, tuning λ requires a deploy cycle per iteration, which is slow and demoralizing. The extension is small (one query-param parse, one loop over variants, reuse the existing enrichment logic) and should be treated as part of the "minimum viable experiment" rather than polish.
 
 **Rollback:**
 
