@@ -16,7 +16,8 @@ import { AtpAgent } from "@atproto/api";
 // doesn't include rpc:app.bsky.actor.getProfile.
 const publicAgent = new AtpAgent({ service: "https://public.api.bsky.app" });
 import { listUsers } from "../sync/users.js";
-import { VOYAGE_API, VOYAGE_MODEL, EMBEDDING_DIMENSIONS } from "../recommend/embed.js";
+import { VOYAGE_API, VOYAGE_MODEL, EMBEDDING_DIMENSIONS, LIKES_NAMESPACE_QUERY, LIKES_NAMESPACE_DOC } from "../recommend/embed.js";
+import { generateUserRecommendations } from "../recommend/index.js";
 import { enrollPage } from "./enroll-page.js";
 import { recsPage } from "./recs-page.js";
 import { recsLookupPage } from "./recs-lookup-page.js";
@@ -248,6 +249,77 @@ api.post("/admin/sync-user/:did", async (c) => {
   });
 
   return c.json({ triggered: true, instanceId: instance.id, did });
+});
+
+// Compare recommendations between the two like-embedding namespaces.
+// Sequential awaits — the second call's recs end up persisted in D1.
+api.get("/admin/compare-recs", async (c) => {
+  const did = c.req.query("did");
+  if (!did) {
+    return c.json({ error: "missing did query param" }, 400);
+  }
+
+  const topN = parseInt(c.env.TOP_N ?? "12", 10) || 12;
+
+  const queryRecs = await generateUserRecommendations(
+    c.env.DB,
+    c.env.VECTORS,
+    did,
+    topN,
+    LIKES_NAMESPACE_QUERY,
+  );
+  const docRecs = await generateUserRecommendations(
+    c.env.DB,
+    c.env.VECTORS,
+    did,
+    topN,
+    LIKES_NAMESPACE_DOC,
+  );
+
+  // Enrich each rec with the document metadata so the comparison is readable.
+  const allUris = Array.from(
+    new Set([...queryRecs, ...docRecs].map((r) => r.document_uri)),
+  );
+
+  type DocRow = {
+    uri: string;
+    title: string;
+    description: string | null;
+    url: string | null;
+    site: string | null;
+  };
+
+  let docs: DocRow[] = [];
+  if (allUris.length > 0) {
+    const placeholders = allUris.map(() => "?").join(",");
+    const result = await c.env.DB.prepare(
+      `SELECT uri, title, description, url, site FROM documents WHERE uri IN (${placeholders})`,
+    )
+      .bind(...allUris)
+      .all<DocRow>();
+    docs = result.results;
+  }
+
+  const docMap = new Map(docs.map((d) => [d.uri, d]));
+
+  const enrich = (rec: { document_uri: string; score: number }) => {
+    const d = docMap.get(rec.document_uri);
+    return {
+      uri: rec.document_uri,
+      score: rec.score,
+      title: d?.title ?? null,
+      description: d?.description ?? null,
+      url: d?.url ?? null,
+      site: d?.site ?? null,
+    };
+  };
+
+  return c.json({
+    did,
+    topN,
+    query: queryRecs.map(enrich),
+    document: docRecs.map(enrich),
+  });
 });
 
 // Start the Jetstream listener DO
