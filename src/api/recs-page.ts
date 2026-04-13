@@ -444,7 +444,7 @@ export function recsPage(data: RecsPageData): string {
   if (recs.length === 0) {
     return `${head}
     <header class="hero">
-      <h1>${data.variant.copy.recsHeading(handle)}</h1>
+      <h1>${data.variant.copy.recsHeading(esc(handle))}</h1>
       <p class="subtitle">${data.variant.copy.tagline}</p>
     </header>
     <div class="empty-card">
@@ -475,7 +475,7 @@ export function recsPage(data: RecsPageData): string {
 
   return `${head}
     <header class="hero">
-      <h1>${data.variant.copy.recsHeading(handle)}</h1>
+      <h1>${data.variant.copy.recsHeading(esc(handle))}</h1>
       <p class="subtitle">${data.variant.copy.tagline}</p>
     </header>
     <div class="grid">
