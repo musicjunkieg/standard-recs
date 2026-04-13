@@ -98,7 +98,8 @@ export async function embedAll(
   apiKey: string,
   embedMode: LikeEmbedMode = "query",
 ): Promise<EmbedResult> {
-  let likeCount = 0;
+  let queryEmbedCount = 0;
+  let docEmbedCount = 0;
   let docCount = 0;
   let errors = 0;
 
@@ -124,7 +125,7 @@ export async function embedAll(
       LIKES_NAMESPACE_QUERY,
       "",
     );
-    likeCount += r.embedded;
+    queryEmbedCount += r.embedded;
     errors += r.errors;
   }
 
@@ -137,7 +138,7 @@ export async function embedAll(
       LIKES_NAMESPACE_DOC,
       LIKES_DOC_ID_PREFIX,
     );
-    likeCount += r.embedded;
+    docEmbedCount += r.embedded;
     errors += r.errors;
   }
 
@@ -185,10 +186,15 @@ export async function embedAll(
     }
   }
 
+  // Both branches process the same input rows, so the count of distinct
+  // likes touched in this run is whichever branch ran (or the max in "both").
+  const likesProcessed = Math.max(queryEmbedCount, docEmbedCount);
   console.log(
-    `Embedded ${likeCount} likes, ${docCount} documents (${errors} errors)`,
+    `Embedded ${likesProcessed} likes ` +
+      `(query=${queryEmbedCount}, doc=${docEmbedCount}), ` +
+      `${docCount} documents (${errors} errors)`,
   );
-  return { likes: likeCount, documents: docCount, errors };
+  return { likes: likesProcessed, documents: docCount, errors };
 }
 
 /**
