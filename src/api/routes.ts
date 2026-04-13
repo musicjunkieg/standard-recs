@@ -115,6 +115,7 @@ api.get("/recs/by-handle/:handle", async (c) => {
 // Get recommendations for a user (content-negotiated: HTML for browsers, JSON for API)
 api.get("/recs/:did", async (c) => {
   const did = c.req.param("did");
+  const variant = c.get("variant");
   const wantsHtml = c.req.header("Accept")?.includes("text/html");
 
   const user = await c.env.DB.prepare(
@@ -130,6 +131,10 @@ api.get("/recs/:did", async (c) => {
     return c.json({ error: "User not enrolled" }, 404);
   }
 
+  if (variant.ranking.kind === "placeholder") {
+    return c.html(recsPage({ state: "placeholder", variant }));
+  }
+
   const { results: recs } = await c.env.DB.prepare(
     `SELECT r.document_uri, r.score, r.generated_at,
             d.title, d.description, d.site, d.path, d.tags, d.published_at,
@@ -137,10 +142,10 @@ api.get("/recs/:did", async (c) => {
      FROM recommendations r
      JOIN documents d ON r.document_uri = d.uri
      LEFT JOIN publications p ON d.site = p.uri
-     WHERE r.did = ?
+     WHERE r.did = ? AND r.variant = ?
      ORDER BY r.score DESC`,
   )
-    .bind(did)
+    .bind(did, variant.key)
     .all();
 
   if (wantsHtml) {
