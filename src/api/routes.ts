@@ -280,7 +280,116 @@ api.post("/admin/compare-recs", async (c) => {
   }
 
   const topN = parseInt(c.env.TOP_N ?? "10", 10) || 10;
+  const variantsParam = c.req.query("variants");
 
+  // New branch: variant comparison — triggered by ?variants=standard,nonstandard
+  // (or any subset). One generateUserRecommendations call returns both variants
+  // after the Task 6 refactor; we just filter by .variant here.
+  if (variantsParam) {
+    const requestedVariants = variantsParam
+      .split(",")
+      .map((v) => v.trim())
+      .filter((v): v is "standard" | "nonstandard" =>
+        v === "standard" || v === "nonstandard",
+      );
+
+    if (requestedVariants.length === 0) {
+      return c.json(
+        { error: "variants param must include 'standard' and/or 'nonstandard'" },
+        400,
+      );
+    }
+
+    const rawLambda = parseFloat(c.env.MMR_LAMBDA ?? "0.6");
+    const lambda =
+      Number.isFinite(rawLambda) && rawLambda >= 0 && rawLambda <= 1
+        ? rawLambda
+        : 0.6;
+
+    const likesNamespace =
+      c.env.LIKE_QUERY_NAMESPACE === "likes_doc" ? "likes_doc" : "likes";
+
+    const allRecs = await generateUserRecommendations(
+      c.env.DB,
+      c.env.VECTORS,
+      did,
+      topN,
+      likesNamespace,
+      true, // dryRun — don't touch D1
+      lambda,
+    );
+
+    // Collect all unique document URIs across all requested variants for
+    // a single enrichment query.
+    const variantBuckets: Record<string, typeof allRecs> = {};
+    for (const v of requestedVariants) {
+      variantBuckets[v] = allRecs.filter((r) => r.variant === v);
+    }
+
+    const allUris = Array.from(
+      new Set(
+        Object.values(variantBuckets)
+          .flat()
+          .map((r) => r.document_uri),
+      ),
+    );
+
+    type DocRow = {
+      uri: string;
+      title: string;
+      description: string | null;
+      site: string | null;
+      path: string | null;
+      publication_url: string | null;
+      publication_name: string | null;
+    };
+
+    let docs: DocRow[] = [];
+    if (allUris.length > 0) {
+      const placeholders = allUris.map(() => "?").join(",");
+      const result = await c.env.DB.prepare(
+        `SELECT d.uri, d.title, d.description, d.site, d.path,
+                p.url AS publication_url, p.name AS publication_name
+         FROM documents d
+         LEFT JOIN publications p ON d.site = p.uri
+         WHERE d.uri IN (${placeholders})`,
+      )
+        .bind(...allUris)
+        .all<DocRow>();
+      docs = result.results;
+    }
+
+    const docMap = new Map(docs.map((d) => [d.uri, d]));
+
+    const enrichRec = (rec: { document_uri: string; score: number }) => {
+      const d = docMap.get(rec.document_uri);
+      return {
+        uri: rec.document_uri,
+        score: rec.score,
+        title: d?.title ?? null,
+        description: d?.description ?? null,
+        url: buildDocumentUrl(
+          d?.publication_url ?? null,
+          d?.site ?? null,
+          d?.path ?? null,
+        ),
+        site:
+          d?.publication_name ??
+          extractHostname(d?.publication_url ?? null) ??
+          extractHostname(d?.site ?? null) ??
+          null,
+      };
+    };
+
+    const enrichedVariants: Record<string, ReturnType<typeof enrichRec>[]> = {};
+    for (const v of requestedVariants) {
+      enrichedVariants[v] = variantBuckets[v].map(enrichRec);
+    }
+
+    return c.json({ did, lambda, topN, variants: enrichedVariants });
+  }
+
+  // Existing branch: namespace comparison (unchanged — supports PR #18 usage).
   const [queryRecs, docRecs] = await Promise.all([
     generateUserRecommendations(
       c.env.DB,
