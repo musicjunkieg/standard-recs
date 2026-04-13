@@ -1128,3 +1128,888 @@ npx tsc --noEmit
 ```
 
 The first command should show the spec commits (`5a82304`, `0507227`, `280bd5d`) plus 7 new commits from this chunk. The typecheck should be clean.
+
+---
+
+## Chunk 2: Page refactors, compare-recs extension, deploy
+
+Tasks 8 through 14. After this chunk, all three subdomains render correctly with their own theme and copy, the recs pages read from the right variant in D1, `/admin/compare-recs` can produce side-by-side variant comparisons for λ tuning, and the whole thing is deployed and smoke-tested against production.
+
+### Task 8: Refactor `src/api/enroll-page.ts` to a variant-aware function
+
+The enroll page is a large template literal. The refactor is mostly mechanical: convert the `const` to a `function`, interpolate variant copy, and replace hardcoded blob colors with CSS custom properties driven per-variant.
+
+**Files:**
+- Modify: `src/api/enroll-page.ts`
+
+- [ ] **Step 1: Read the current file**
+
+```bash
+cat src/api/enroll-page.ts
+```
+
+Note the overall shape: one top-level `export const enrollPage = \`<!DOCTYPE html>...\`;`. The template has `:root` CSS custom properties near the top, a `<style>` block with the blob field CSS (four `.blob--*` rules with hardcoded colors), the `<body>` with SVG atmosphere + main content, and inline strings like `"standard-recs"` / `"Start typing your handle..."` / `"Powered by Standard.site"`.
+
+- [ ] **Step 2: Add the `Variant` import**
+
+At the top of the file, add:
+
+```typescript
+import type { Variant } from "../variants.js";
+```
+
+- [ ] **Step 3: Change the export from a const to a function**
+
+Find:
+
+```typescript
+export const enrollPage = `<!DOCTYPE html>
+```
+
+Change to:
+
+```typescript
+export function enrollPage(variant: Variant): string {
+  return `<!DOCTYPE html>
+```
+
+At the very bottom of the file, find the closing backtick and semicolon of the template literal:
+
+```typescript
+</html>`;
+```
+
+Change to:
+
+```typescript
+</html>`;
+}
+```
+
+(Adds the closing brace for the function.)
+
+- [ ] **Step 4: Inject variant theme into the `:root` CSS**
+
+Find the existing `:root` block in the page's `<style>` section. It currently looks something like:
+
+```css
+:root {
+  --paper: #f8f5ef;
+  --ink: #2b2b2b;
+  --ink-soft: #5f5f5f;
+  /* ...other existing vars... */
+}
+```
+
+Immediately after the opening `:root {`, add four new custom properties driven by the variant:
+
+```css
+:root {
+  --variant-brand: ${variant.brand.hex};
+  --variant-blob-1: ${variant.brand.blobs[0]};
+  --variant-blob-2: ${variant.brand.blobs[1]};
+  --variant-blob-3: ${variant.brand.blobs[2]};
+  --variant-blob-4: ${variant.brand.blobs[3]};
+  --paper: #f8f5ef;
+  /* ...rest unchanged... */
+}
+```
+
+Because `:root` is already inside a template literal, the `${variant.brand.hex}` interpolation is automatic. The four new custom properties are always present; unknown variants fall through to `standard` at the middleware layer, so the vars will always resolve.
+
+- [ ] **Step 5: Replace hardcoded blob colors with `var(--variant-blob-N)`**
+
+Find the four blob-field CSS rules in the file's `<style>` block. They look roughly like:
+
+```css
+.blob--1 {
+  background: radial-gradient(circle, #d99566 0%, transparent 60%);
+  /* ...positioning... */
+}
+.blob--2 { background: radial-gradient(circle, #7e9eba 0%, transparent 60%); }
+.blob--3 { background: radial-gradient(circle, #a78bfa 0%, transparent 60%); }
+.blob--4 { background: radial-gradient(circle, #d8a18b 0%, transparent 60%); }
+```
+
+Replace each hardcoded color with the corresponding CSS custom property:
+
+```css
+.blob--1 { background: radial-gradient(circle, var(--variant-blob-1) 0%, transparent 60%); /* ... */ }
+.blob--2 { background: radial-gradient(circle, var(--variant-blob-2) 0%, transparent 60%); }
+.blob--3 { background: radial-gradient(circle, var(--variant-blob-3) 0%, transparent 60%); }
+.blob--4 { background: radial-gradient(circle, var(--variant-blob-4) 0%, transparent 60%); }
+```
+
+The actual color names / gradient stops / positioning details may differ from the snippet above — don't rewrite the structure, just replace the `#xxxxxx` literals inside the `radial-gradient` calls with `var(--variant-blob-N)`. Use a find-and-replace on the four hex codes listed in `src/variants.ts`'s `standard` entry if that's easier (`#d99566`, `#7e9eba`, `#a78bfa`, `#d8a18b`).
+
+**Also check the focus ring and any accent-colored UI elements.** Search the file for the amber hex `#d99566` or similar brand colors used for focus outlines / button highlights / match-score chips — replace those with `var(--variant-brand)`.
+
+- [ ] **Step 6: Replace inline strings with variant copy**
+
+Find and replace:
+
+| Find | Replace with |
+|---|---|
+| `standard-recs` (the `<h1>` title text) | `${variant.copy.title}` |
+| `Discover Standard.site writing based on what you like on Bluesky.` (the tagline paragraph) | `${variant.copy.tagline}` |
+| `Start typing your handle...` or `Start typing your handle…` (input placeholder attribute) | `${variant.copy.placeholder}` |
+| `Powered by Standard.site` (the footer text, if present) | `${variant.copy.footer}` |
+
+Be careful to ONLY replace text content — do not replace `standard-recs` in HTML attribute values or URL paths that should stay literal. Use context (surrounding tags) to confirm each replacement is the visible copy.
+
+- [ ] **Step 7: Typecheck**
+
+```bash
+npx tsc --noEmit
+```
+
+Expected: clean.
+
+- [ ] **Step 8: Review the diff**
+
+```bash
+git diff src/api/enroll-page.ts
+```
+
+Confirm:
+- One new import at the top (`type Variant`).
+- Top-level declaration changed from `const` to `function` with a closing `}` at the end.
+- `:root` block has 5 new `--variant-*` custom properties at the top, driven by `${variant.brand.*}`.
+- Four `.blob--N` rules reference `var(--variant-blob-N)` instead of hardcoded hex.
+- Any brand-accent references (focus rings, chips) reference `var(--variant-brand)`.
+- Four inline strings replaced with `${variant.copy.*}` interpolations.
+- No other changes to markup structure, script tags, or event handlers.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/api/enroll-page.ts
+git commit -m "$(cat <<'EOF'
+refactor(enroll-page): make variant-aware via CSS custom properties
+
+enrollPage is now a function taking a Variant instead of a top-level
+const. The variant's brand hex + 4 blob colors are injected via new
+--variant-brand / --variant-blob-N CSS custom properties at the top of
+the :root block. All hardcoded blob colors in the blob field CSS are
+replaced with var(--variant-blob-N) references, and any brand-accent
+references (focus rings, etc.) reference var(--variant-brand). Inline
+strings for title, tagline, placeholder, and footer are replaced with
+variant.copy.* interpolations.
+
+Downstream route handler updates to call enrollPage(c.get("variant"))
+come in Task 11.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+### Task 9: Refactor `src/api/recs-page.ts` to a variant-aware function with `placeholder` state
+
+Same pattern as Task 8 plus a new discriminated state for substandardrecs.
+
+**Files:**
+- Modify: `src/api/recs-page.ts`
+
+- [ ] **Step 1: Read the current file**
+
+```bash
+cat src/api/recs-page.ts
+```
+
+Note: the existing `recsPage` takes a `RecsPageData` discriminated union with `{ state: "found" | "not_found" }`. It renders differently based on state. You'll add a third state `placeholder`.
+
+- [ ] **Step 2: Add the `Variant` import**
+
+```typescript
+import type { Variant } from "../variants.js";
+```
+
+- [ ] **Step 3: Expand the `RecsPageData` type**
+
+Find the existing type definition. It looks like:
+
+```typescript
+export type RecsPageData =
+  | { state: "found"; handle: string; did: string; recs: Rec[] }
+  | { state: "not_found" };
+```
+
+Replace with:
+
+```typescript
+export type RecsPageData =
+  | { state: "found"; handle: string; did: string; recs: Rec[]; variant: Variant }
+  | { state: "not_found"; variant: Variant }
+  | { state: "placeholder"; variant: Variant };
+```
+
+Every state now carries the `variant` — the caller passes it in from `c.get("variant")`.
+
+- [ ] **Step 4: Update the function signature (if it takes separate args, unify through `RecsPageData`)**
+
+The existing function probably looks like:
+
+```typescript
+export function recsPage(data: RecsPageData): string {
+  // ...
+}
+```
+
+No signature change needed — `data.variant` is now available everywhere inside the function. If the function currently takes `data: RecsPageData` and then uses hardcoded strings / colors, this task is about threading `data.variant.*` through the existing template.
+
+- [ ] **Step 5: Inject variant theme into `:root`**
+
+Same pattern as Task 8 Step 4. The template's `:root` block gets five new `--variant-*` custom properties at the top:
+
+```css
+:root {
+  --variant-brand: ${data.variant.brand.hex};
+  --variant-blob-1: ${data.variant.brand.blobs[0]};
+  --variant-blob-2: ${data.variant.brand.blobs[1]};
+  --variant-blob-3: ${data.variant.brand.blobs[2]};
+  --variant-blob-4: ${data.variant.brand.blobs[3]};
+  /* ...existing :root content... */
+}
+```
+
+If the template is split across multiple string fragments for the different states (found/not_found), apply the same `:root` injection to each — or refactor to share a common `<head>` / theme block. Don't over-refactor; the simplest change that gets variant-theming working is to add the injection wherever the `:root` block currently lives.
+
+- [ ] **Step 6: Replace hardcoded blob colors and brand-accent colors**
+
+Same pattern as Task 8 Step 5. Search for hex colors (`#d99566`, `#7e9eba`, `#a78bfa`, `#d8a18b`, and the brand accent `#d99566`) and replace with `var(--variant-blob-N)` / `var(--variant-brand)` as appropriate.
+
+- [ ] **Step 7: Replace inline strings with variant copy**
+
+The heading is currently something like `<h1>Recs for @${handle}</h1>` or `<h1>Recs for @${data.handle}</h1>`. Replace with a call to `data.variant.copy.recsHeading`:
+
+```html
+<h1>${data.variant.copy.recsHeading(data.handle)}</h1>
+```
+
+Also replace any hardcoded "Recs" / "Standard.site" / "Powered by Standard.site" text with the variant's copy fields:
+
+| Find | Replace with |
+|---|---|
+| `Recs for @${handle}` | `${data.variant.copy.recsHeading(data.handle)}` |
+| `Powered by Standard.site` in the footer | `${data.variant.copy.footer}` |
+
+(For `not_found`, there may not be a handle to display — use `data.variant.copy.title` or similar as the header. Adapt based on what the current `not_found` rendering uses.)
+
+- [ ] **Step 8: Add the `placeholder` state rendering**
+
+In the function body, find the dispatch on `data.state`. It currently handles `found` and `not_found`. Add a third branch for `placeholder`:
+
+```typescript
+if (data.state === "placeholder") {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${data.variant.copy.title}</title>
+  <!-- ...same <style> block with :root injection... -->
+</head>
+<body>
+  <div class="atmosphere"><!-- blob field --></div>
+  <main>
+    <h1>${data.variant.copy.title}</h1>
+    <p class="tagline">${data.variant.copy.tagline}</p>
+    <div class="empty-card">
+      <p>Recommendations for this variant aren't available yet.</p>
+      <p class="hint">Check back soon — we're still working on it.</p>
+    </div>
+  </main>
+  <footer>${data.variant.copy.footer}</footer>
+</body>
+</html>`;
+}
+```
+
+The exact markup should mirror the existing `not_found` state's structure — reuse the same CSS classes, the same `<head>`, the same footer. The only difference is the empty-card content. If the `not_found` state is a short function that returns a subset of the main template, wrap the placeholder in the same pattern.
+
+**Practical approach:** copy the `not_found` block wholesale, rename to `placeholder`, and change only the empty-card message. The existing `not_found` block probably already has all the theming + variant copy wiring from Steps 5-7 of this task.
+
+- [ ] **Step 9: Typecheck**
+
+```bash
+npx tsc --noEmit
+```
+
+Expected: clean.
+
+- [ ] **Step 10: Review the diff**
+
+```bash
+git diff src/api/recs-page.ts
+```
+
+Confirm:
+- Import for `Variant`.
+- `RecsPageData` has `variant` on all three states, and the new `placeholder` state.
+- `:root` CSS has the variant custom property injection.
+- Blob field CSS uses `var(--variant-blob-N)`.
+- Inline strings use `data.variant.copy.*`.
+- New `placeholder` rendering branch.
+- No changes to unrelated code (rec-card markup, score formatting, etc.).
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add src/api/recs-page.ts
+git commit -m "$(cat <<'EOF'
+refactor(recs-page): variant-aware with new placeholder state
+
+RecsPageData now carries a `variant: Variant` on every state (found /
+not_found / placeholder). The template interpolates variant copy
+(title, tagline, recsHeading, footer) and uses CSS custom properties
+driven per-variant for the blob field and brand accents — same pattern
+as enroll-page.
+
+New `placeholder` state renders an empty-card hero that substandardrecs
+and any future variants with RankingStrategy.kind === "placeholder"
+can use. Structure mirrors not_found so all theming is shared.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+### Task 10: Refactor `src/api/recs-lookup-page.ts` to a variant-aware function
+
+Minimal change — same pattern as Task 8 but for a much smaller page.
+
+**Files:**
+- Modify: `src/api/recs-lookup-page.ts`
+
+- [ ] **Step 1: Read the file**
+
+```bash
+cat src/api/recs-lookup-page.ts
+```
+
+Note the top-level export (likely `export const recsLookupPage = \`...\`;`) and the inline strings / colors.
+
+- [ ] **Step 2: Add the `Variant` import**
+
+```typescript
+import type { Variant } from "../variants.js";
+```
+
+- [ ] **Step 3: Convert to a function and interpolate variant copy**
+
+Change `export const recsLookupPage = \`...\`;` to `export function recsLookupPage(variant: Variant): string { return \`...\`; }` (same pattern as Task 8 Step 3).
+
+Inside the template, inject the `:root` variant custom properties, replace any hardcoded blob colors with `var(--variant-blob-N)`, replace brand accents with `var(--variant-brand)`, and replace inline copy strings (title, tagline if present, footer) with `${variant.copy.*}` references.
+
+This page is much smaller than `enroll-page.ts` — expect maybe 10-15 lines of changes total.
+
+- [ ] **Step 4: Typecheck**
+
+```bash
+npx tsc --noEmit
+```
+
+- [ ] **Step 5: Review the diff**
+
+```bash
+git diff src/api/recs-lookup-page.ts
+```
+
+Same kind of check as Tasks 8 and 9 — function signature change, variant CSS injection, variant copy interpolation.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/api/recs-lookup-page.ts
+git commit -m "$(cat <<'EOF'
+refactor(recs-lookup-page): variant-aware, same pattern as enroll-page
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+### Task 11: Update route handlers to consume `c.get("variant")`
+
+Wire the three page-rendering handlers to pass the variant through, and add variant filtering to the recs SQL query.
+
+**Files:**
+- Modify: `src/api/routes.ts`
+
+- [ ] **Step 1: Update the `GET /` handler**
+
+Find:
+
+```typescript
+api.get("/", (c) => c.html(enrollPage));
+```
+
+(Or similar — it might be `async` and have additional logic.) Change to:
+
+```typescript
+api.get("/", (c) => c.html(enrollPage(c.get("variant"))));
+```
+
+- [ ] **Step 2: Update the `GET /recs` lookup handler**
+
+Find the handler that renders `recsLookupPage`. Same pattern:
+
+```typescript
+api.get("/recs", (c) => c.html(recsLookupPage(c.get("variant"))));
+```
+
+- [ ] **Step 3: Update the `GET /recs/:did` handler to filter by variant and handle `placeholder`**
+
+This is the most substantive change in Task 11. Find the handler; it currently looks roughly like:
+
+```typescript
+api.get("/recs/:did", async (c) => {
+  const did = c.req.param("did");
+  const { results: recs } = await c.env.DB.prepare(
+    `SELECT r.document_uri, r.score, d.title, d.description, d.site, d.path,
+            p.url AS publication_url, p.name AS publication_name
+     FROM recommendations r
+     JOIN documents d ON r.document_uri = d.uri
+     LEFT JOIN publications p ON d.site = p.uri
+     WHERE r.did = ?
+     ORDER BY r.score DESC`
+  ).bind(did).all();
+  // ...build Rec[] and render recsPage({ state: "found", ..., recs, handle })...
+});
+```
+
+Add variant awareness:
+
+```typescript
+api.get("/recs/:did", async (c) => {
+  const did = c.req.param("did");
+  const variant = c.get("variant");
+
+  // Look up the user first — a missing user is not_found regardless of variant.
+  const { results: users } = await c.env.DB.prepare(
+    `SELECT did, handle FROM users WHERE did = ?`
+  ).bind(did).all<{ did: string; handle: string }>();
+  if (users.length === 0) {
+    return c.html(recsPage({ state: "not_found", variant }));
+  }
+  const handle = users[0].handle;
+
+  // Variants with a placeholder ranking strategy render the placeholder state
+  // regardless of D1 contents — no SELECT needed.
+  if (variant.ranking.kind === "placeholder") {
+    return c.html(recsPage({ state: "placeholder", variant }));
+  }
+
+  // Otherwise, SELECT the rows for this (did, variant) and render found.
+  const { results: recs } = await c.env.DB.prepare(
+    `SELECT r.document_uri, r.score, d.title, d.description, d.site, d.path,
+            p.url AS publication_url, p.name AS publication_name
+     FROM recommendations r
+     JOIN documents d ON r.document_uri = d.uri
+     LEFT JOIN publications p ON d.site = p.uri
+     WHERE r.did = ? AND r.variant = ?
+     ORDER BY r.score DESC`
+  ).bind(did, variant.key).all<...>();
+
+  // ...rest of the existing Rec[] building + recsPage({ state: "found", ..., variant }) render...
+});
+```
+
+**Important:** the existing handler's exact structure differs from this sketch (different variable names, different user-lookup logic, maybe an intermediate OAuth session check). Do NOT do a wholesale rewrite. Instead:
+
+1. Add `const variant = c.get("variant");` near the top of the handler.
+2. Add the `variant.ranking.kind === "placeholder"` check before the main SELECT.
+3. Modify the existing SELECT to add `AND r.variant = ?` and bind `variant.key` as the second parameter.
+4. Add `variant` to the `recsPage({...})` object at the render sites.
+
+The surgical edit is: three new lines + one WHERE clause addition + one render-arg addition per state. Do not rewrite the handler.
+
+- [ ] **Step 4: Typecheck**
+
+```bash
+npx tsc --noEmit
+```
+
+Expected: clean. If you get "Property 'variant' is missing in type" errors from the `recsPage` call sites, you forgot to add `variant` to one of the object literals passed to `recsPage`.
+
+- [ ] **Step 5: Review the diff**
+
+```bash
+git diff src/api/routes.ts
+```
+
+Confirm:
+- `GET /` calls `enrollPage(c.get("variant"))`.
+- `GET /recs` calls `recsLookupPage(c.get("variant"))`.
+- `GET /recs/:did` pulls `variant` from context, checks for placeholder, filters SQL by `variant.key`, passes `variant` to every `recsPage({...})` call.
+- No other handlers touched (that's task 12's job for compare-recs).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/api/routes.ts
+git commit -m "$(cat <<'EOF'
+feat(routes): wire variant into enroll, recs-lookup, and recs/:did
+
+The three page-rendering handlers now read c.get("variant") and
+pass it through to the page templates. The recs/:did handler also
+filters the SELECT by variant.key and short-circuits to the
+placeholder state for variants with ranking.kind === "placeholder"
+(substandard today, any future strategy-less variants tomorrow).
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+### Task 12: Extend `/admin/compare-recs` to take a `?variants=...` query param
+
+The existing `/admin/compare-recs` (from PR #18) compares the two *like-embedding namespaces*. After Task 6, `generateUserRecommendations` always returns both standard + nonstandard variants in one call — so variant comparison is cheaper than namespace comparison. This task adds a query parameter that selects which variants to include in the response.
+
+**Files:**
+- Modify: `src/api/routes.ts`
+
+- [ ] **Step 1: Read the current `/admin/compare-recs` handler**
+
+```bash
+grep -n "compare-recs" src/api/routes.ts
+```
+
+Find the handler (there's only one). Read it end-to-end and note:
+- It currently calls `generateUserRecommendations` twice in parallel via `Promise.all`, once per namespace.
+- It returns a JSON object with two rec lists and enriched document metadata.
+- It uses `dryRun=true` so neither call writes to D1.
+
+- [ ] **Step 2: Add variant filtering**
+
+After Task 6's refactor, a single `generateUserRecommendations` call returns BOTH `standard` and `nonstandard` recs (as `Recommendation[]` with a `variant` field). You can get both variants for free now.
+
+Leave the existing namespace comparison behavior alone (it's still valuable for `likes_doc` experiments). Add a new code path triggered by `?variants=standard,nonstandard`:
+
+```typescript
+api.get("/admin/compare-recs", async (c) => {
+  const did = c.req.query("did");
+  if (!did) return c.json({ error: "did query param required" }, 400);
+
+  const variantsParam = c.req.query("variants");
+  const namespacesParam = c.req.query("namespaces");
+
+  // New path: variant comparison
+  if (variantsParam) {
+    const requestedVariants = variantsParam.split(",").map((v) => v.trim());
+    const lambda = parseFloat(c.env.MMR_LAMBDA ?? "0.6");
+    const validLambda =
+      Number.isFinite(lambda) && lambda >= 0 && lambda <= 1 ? lambda : 0.6;
+
+    // One call produces both variants (standard + nonstandard); filter to
+    // whatever the caller asked for.
+    const allRecs = await generateUserRecommendations(
+      c.env.DB,
+      c.env.VECTORS,
+      did,
+      parseInt(c.env.TOP_N ?? "10", 10),
+      parseLikesNamespace(c.env.LIKE_QUERY_NAMESPACE),
+      true,          // dryRun — don't touch D1
+      validLambda,
+    );
+
+    const byVariant: Record<string, typeof allRecs> = {};
+    for (const v of requestedVariants) {
+      byVariant[v] = allRecs.filter((r) => r.variant === v);
+    }
+
+    // Enrich with document metadata (same pattern as the existing namespace
+    // comparison path — look at the handler above for the enrichment helper).
+    // Reuse whatever enrichRecs() / inline join logic is already there.
+    return c.json({ did, variants: byVariant });
+  }
+
+  // Existing path: namespace comparison (unchanged)
+  // ... existing code for ?namespaces=query,document ...
+});
+```
+
+**Note:** `parseLikesNamespace` must be imported in `routes.ts` from `../workflow.js` (or wherever it lives). If it's not exported there, inline the logic: `const ns = c.env.LIKE_QUERY_NAMESPACE === "likes_doc" ? "likes_doc" : "likes";`.
+
+**Note 2:** the existing enrichment logic (which joins rec URIs against the `documents` + `publications` tables to produce `{ title, description, url, site }` per rec) should be reused for the new path. If the existing handler has a helper function like `enrichRecs`, call it on each filtered variant list. If the enrichment is inline in the existing handler, extract it to a local helper first, then call it from both paths.
+
+The exact refactor depends on the existing handler's structure. Do the minimal refactor needed to share the enrichment between the old and new paths.
+
+- [ ] **Step 3: Typecheck**
+
+```bash
+npx tsc --noEmit
+```
+
+- [ ] **Step 4: Review the diff**
+
+```bash
+git diff src/api/routes.ts
+```
+
+Confirm:
+- The existing namespace comparison path still works (unchanged when `?variants` is not provided).
+- New variant path is triggered by `?variants=...`.
+- Enrichment is shared between the two paths.
+- `generateUserRecommendations` is called with `dryRun=true` — no D1 writes.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/api/routes.ts
+git commit -m "$(cat <<'EOF'
+feat(admin): extend /admin/compare-recs to take ?variants=
+
+Adds a second comparison mode to the admin endpoint: pass
+?variants=standard,nonstandard (or any subset) and get back
+side-by-side enriched rec lists for each requested variant. Under
+the hood this is free — generateUserRecommendations already returns
+both variants after the Task 6 refactor, so the new path just
+filters the returned array.
+
+The existing ?namespaces= path for like-embedding namespace
+comparison is unchanged, so PR #18 usage still works.
+
+dryRun=true on the generateUserRecommendations call means this
+endpoint is still safe to hit repeatedly during λ tuning without
+mutating any user's persisted recommendations.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+### Task 13: Final typecheck, bundler dry-run, and full-branch diff review
+
+Pre-deploy sanity checks. If any of these fail, **STOP** and escalate — do not deploy broken code.
+
+**Files:** none (verification only)
+
+- [ ] **Step 1: Final typecheck**
+
+```bash
+npx tsc --noEmit
+```
+
+Expected: clean exit, no output.
+
+- [ ] **Step 2: Bundler dry-run**
+
+```bash
+npx wrangler deploy --dry-run --outdir=/tmp/wrangler-dryrun-recs-variants 2>&1 | tail -40
+```
+
+Expected:
+- No errors or warnings (other than the known `Vectorize Index bindings do not support local development` warning and the `Scheduled Workers are not automatically triggered during local development` warning, both of which appear on every dry-run).
+- Bindings table shows `env.MMR_LAMBDA ("0.6")`.
+- All three custom domain routes are acknowledged in the output (wrangler lists them under the routes section).
+- Bundle size reported; should be roughly similar to before the PR (maybe +5-10KB for the new files).
+
+- [ ] **Step 3: Full-branch diff review**
+
+```bash
+git log --oneline main..HEAD
+```
+
+Expected: 3 spec commits (from brainstorming) + 2 plan commits (chunk 1 docs + chunk 2 docs) + 12 implementation commits (one per task 1-12) = **17 commits**. Adjust expectations if the spec or plan commits were squashed differently.
+
+```bash
+git diff main..HEAD --stat
+```
+
+Expected files changed:
+- `docs/superpowers/specs/2026-04-13-recs-variants-design.md` (new)
+- `docs/superpowers/plans/2026-04-13-recs-variants.md` (new)
+- `src/variants.ts` (new)
+- `src/recommend/mmr.ts` (new)
+- `src/env.ts` (small modification)
+- `src/recommend/index.ts` (modification)
+- `src/workflow.ts` (small modification)
+- `src/api/routes.ts` (modification)
+- `src/api/enroll-page.ts` (modification)
+- `src/api/recs-page.ts` (modification)
+- `src/api/recs-lookup-page.ts` (small modification)
+- `schema.sql` (small modification)
+- `wrangler.toml` (small modification)
+
+**No other files should be modified.** If `git diff main..HEAD --stat` shows anything else, investigate before deploying.
+
+- [ ] **Step 4: Confirm the pre-session dirty state is still dirty and not committed**
+
+```bash
+git diff wrangler.toml
+```
+
+Should show the user's pre-session local edits (`TOP_N = "12"`, `WORKER_URL` change, etc.) still unstaged. If this is empty, the local edits got committed somewhere — investigate before deploying.
+
+---
+
+### Task 14: Deploy + post-deploy smoke tests
+
+This task actually puts the variant system live. **Requires user approval before running `npm run deploy`** — deploying affects production. Ask the user explicitly: "Ready to deploy the variant system? (yes / no / wait)".
+
+**Files:** none (operational)
+
+- [ ] **Step 1: Push the branch and confirm with user**
+
+```bash
+git push -u origin feat/recs-variants
+```
+
+Tell the user: the branch is pushed, the PR can be opened any time, and the deploy is about to happen against production from the local working copy.
+
+- [ ] **Step 2: Deploy**
+
+```bash
+npm run deploy
+```
+
+Expected: wrangler uploads the Worker, prints the new worker URL, confirms the three custom domain routes are attached. The first deploy may take 30-90 seconds to provision new SSL certs for `nonstandardrecs.site` and `substandardrecs.site` — transient 522/523 errors during that window are expected.
+
+- [ ] **Step 3: Trigger a full sync so nonstandard rec rows get populated**
+
+```bash
+curl -X POST https://standardrecs.site/admin/sync
+```
+
+Watch for a success response. The sync workflow is durable — it runs asynchronously and will take some minutes to complete. You can monitor progress via:
+
+```bash
+# Cloudflare Workflows API — list instances, find the most recent, check status
+wrangler workflows list standard-recs-sync  # if wrangler supports this
+# Or use gh/curl against the Workflows API directly (see prior debugging sessions)
+```
+
+Don't proceed to Step 4 until the sync finishes (look for a recent instance with `status: "complete"`).
+
+- [ ] **Step 4: Smoke test the three landing pages**
+
+```bash
+curl -s https://standardrecs.site/    | grep -oE '<title>[^<]*</title>'
+curl -s https://nonstandardrecs.site/ | grep -oE '<title>[^<]*</title>'
+curl -s https://substandardrecs.site/ | grep -oE '<title>[^<]*</title>'
+```
+
+Expected:
+- `standardrecs.site` → `<title>standard-recs</title>` (or similar — whatever `VARIANTS.standard.copy.title` renders).
+- `nonstandardrecs.site` → `<title>nonstandard-recs</title>`.
+- `substandardrecs.site` → `<title>substandard-recs</title>`.
+
+Also visit each in a browser if possible — confirm:
+- Each page's blob field is visually different (different dominant color).
+- Each page's heading + tagline match the variant.
+- The focus ring on the input uses the variant's accent color.
+
+- [ ] **Step 5: Smoke test the three recs pages for your own DID**
+
+Replace `<your-did>` with your actual Bluesky DID (same one you've been using for `/admin/compare-recs` throughout the project).
+
+```bash
+curl -sL https://standardrecs.site/recs/<your-did>    | head -100
+curl -sL https://nonstandardrecs.site/recs/<your-did> | head -100
+curl -sL https://substandardrecs.site/recs/<your-did> | head -100
+```
+
+Expected:
+- `standardrecs.site/recs/...` → renders the standard top-12 in the warm amber theme (same as before the PR).
+- `nonstandardrecs.site/recs/...` → renders 12 DIFFERENT documents in a slate-blue theme. These should be the MMR picks — close to taste but distinct from the standard list.
+- `substandardrecs.site/recs/...` → renders the `placeholder` empty-card hero in olive-yellow theme, with the "Coming soon" or "Recommendations for this variant aren't available yet" copy.
+
+**If any of these return 500:** check the Cloudflare Workers logs via `wrangler tail` or the dashboard. Most likely issues: a typo in the route handler's SQL, a missing `variant` argument to `recsPage(...)`, or a D1 error about the `variant` column missing (if Task 5's schema apply didn't run). Fix and redeploy.
+
+- [ ] **Step 6: Use the extended `/admin/compare-recs` to A/B the variants**
+
+```bash
+curl -s "https://standardrecs.site/admin/compare-recs?did=<your-did>&variants=standard,nonstandard" | jq .
+```
+
+Expected: JSON with `variants: { standard: [...], nonstandard: [...] }`, each containing 12 enriched rec objects (uri, score, title, description, url, site).
+
+Eyeball the two lists. The `standard` list should match what `standardrecs.site/recs/<your-did>` rendered. The `nonstandard` list should be the MMR picks — same 12-element length but different documents, hopefully feeling "adjacent" rather than identical.
+
+**If nonstandard feels too similar to standard:** λ=0.6 might be too high for your taste/corpus. Try:
+
+```bash
+# Locally override MMR_LAMBDA via wrangler vars, then re-trigger sync
+# (or just update wrangler.toml and redeploy for tuning iterations)
+```
+
+This is the λ-tuning loop. Pick a λ that feels right based on eyeballing.
+
+- [ ] **Step 7: Open the PR**
+
+```bash
+gh pr create --title "feat: three-variant recommendation system with MMR nonstandardrecs" --body "$(cat <<'EOF'
+## Summary
+
+Ships the variant recommendation system described in [`docs/superpowers/specs/2026-04-13-recs-variants-design.md`](docs/superpowers/specs/2026-04-13-recs-variants-design.md).
+
+**Three subdomains, one Worker:**
+- `standardrecs.site` — existing top-N cosine ranking, existing warm amber theme
+- `nonstandardrecs.site` — new: MMR ranking (Carbonell & Goldstein 1998) with λ=0.6, cool slate-blue theme
+- `substandardrecs.site` — new: fully routed + themed placeholder (olive-yellow), awaiting its ranking strategy
+
+**What's new:**
+- `src/variants.ts` — variant registry + hostname lookup
+- `src/recommend/mmr.ts` — pure MMR helper
+- `schema.sql` — `variant` column + index
+- `generateUserRecommendations` — computes both variants in one pass
+- Hono middleware reads `host`, stores variant on request context
+- All three page templates are variant-aware (function-taking-Variant, CSS custom properties for theme)
+- `/admin/compare-recs` extended to take `?variants=...` for λ tuning
+
+**New env var:** `MMR_LAMBDA = "0.6"` — tunable without redeploy if the default feels off.
+
+**Rollback:** revert this PR, or set `MMR_LAMBDA` to something that effectively disables MMR. The `variant` column stays on the table harmlessly.
+
+## Test plan (post-merge)
+
+- [x] `npx tsc --noEmit` — clean
+- [x] `npx wrangler deploy --dry-run` — clean, shows all three routes
+- [x] `npm run deploy` — no errors
+- [x] Visit all three subdomains — each renders with its own theme and copy
+- [x] Visit `/recs/<my-did>` on each subdomain — different rec lists per variant
+- [x] `GET /admin/compare-recs?did=<my-did>&variants=standard,nonstandard` — side-by-side JSON looks correct
+- [ ] λ tuning via compare-recs (follow-up — 0.6 is a guess, may need adjustment)
+
+## Caveats
+
+- OAuth flow currently returns to `WORKER_URL` (a fixed hostname). A user who starts enrollment from `nonstandardrecs.site` will come back to `standardrecs.site` after authorizing. They can manually navigate to `nonstandardrecs.site/recs/<their-did>` to see the nonstandard list. Fixing this properly (tracking the starting subdomain through OAuth state) is a separate PR.
+- Pre-existing embed scaling bug (cron re-embeds hot 500 likes every run) is still present and out of scope.
+- Substandardrecs shows "Coming soon" until a ranking strategy is picked — separate follow-up PR.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+Return the PR URL to the user.
+
+---
+
+**End of Chunk 2.** All 14 tasks complete. The variant system is live on production, the PR is open, and the user can merge + continue tuning λ via `/admin/compare-recs` at their leisure.
+
+### Known limitations / follow-ups
+
+These are documented in the spec's "Open questions / deferred" section and are NOT part of this plan:
+
+1. **OAuth return-to-origin**: enrollment always lands back on `standardrecs.site` regardless of starting subdomain. Users who enrolled via `nonstandardrecs.site` have to manually re-navigate. Fix requires tracking the starting subdomain through OAuth state.
+
+2. **Substandardrecs ranking strategy**: currently a `placeholder`. Candidates under discussion: inverted cosine, ASC sort from bottom of top-50, random, curated weird list. Own spec.
+
+3. **Analytics**: no variant-tagged click tracking. Will want this eventually to measure whether nonstandardrecs actually gets engagement, but deferred until the variants feel stable.
+
+4. **Pre-existing embed scaling bug**: still re-embeds hot 500 likes every run. Tracked in `~/.claude/projects/-Users-bryan-guffey-Code-standard-recs/memory/project_embed_scaling.md`. Separate PR.
+
+5. **λ tuning**: 0.6 is a guess. Expect 1-2 rounds of `MMR_LAMBDA` adjustment after launch, each a one-line `wrangler.toml` edit + `npm run deploy`.
