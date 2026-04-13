@@ -1,0 +1,434 @@
+# Recommendation Variants: Design
+
+**Date:** 2026-04-13
+**Status:** Approved for implementation
+**Author:** Bryan Guffey (design), Claude (scribe)
+
+## Motivation
+
+`standardrecs.site` already recommends Standard.site writing based on Bluesky likes via a classic top-N cosine similarity pipeline. Two companion products are planned:
+
+- **`nonstandardrecs.site`** — "You'd never pick this. Trust us." Deliberate serendipity — high cosine to taste but *not* the obvious nearest-neighbor picks. A curated "near miss" feel.
+- **`substandardrecs.site`** — "You'll hate these." Intentionally bad recommendations, as a bit.
+
+All three sites are served by **one Cloudflare Worker** (same pipeline, same embeddings, same Vectorize index, same D1 database) with the ranking strategy selected by hostname. The interesting technical problem is `nonstandardrecs`: what does "surprising but trustworthy" actually mean in a 1024-dimensional embedding space?
+
+This spec covers the **variant infrastructure** plus **`nonstandardrecs`'s MMR ranking** as the first concrete non-standard strategy. It leaves a placeholder hook for `substandardrecs` so the subdomain can be routed and rendered end-to-end even before the anti-rec algorithm is picked.
+
+## Scope
+
+**In scope:**
+
+- A variant abstraction (`Variant` type, `VARIANTS` registry, `HOSTNAME_TO_VARIANT` lookup).
+- Hono middleware that reads `host` and stores the matched variant on the request context.
+- Three `[[routes]]` blocks in `wrangler.toml` so one Worker serves all three subdomains as custom domains.
+- Schema change: add a `variant` column to the `recommendations` table plus an index on `(did, variant)`.
+- `generateUserRecommendations()` computes *all* enabled variants for a user in one pass and writes them in a single D1 batch.
+- **Nonstandard ranking via MMR (Maximal Marginal Relevance)** — Carbonell & Goldstein 1998. λ=0.6, tunable via new `MMR_LAMBDA` env var.
+- Theme refactor: the existing enroll + recs page templates move from hardcoded colors to CSS custom properties driven per-variant at render time.
+- Per-variant copy (title, tagline, input placeholder, recs heading, footer message) lives in `VARIANTS`.
+- Substandardrecs variant is fully registered, routed, and renders a "Coming soon" placeholder. No ranking yet.
+
+**Out of scope:**
+
+- The actual substandardrecs ranking algorithm. Follow-up PR. Candidates discussed but not picked: inverted cosine, ASC sort from bottom of top-50, random selection, or a curated weird list.
+- Per-variant analytics / click tracking. Useful for measuring the experiment, but a separate spec — drag it in only when the variants feel worth measuring.
+- Full visual identity redesigns for the variants (different fonts, different layouts, different blob compositions beyond recoloring). The "string + accent color" approach is deliberately the cheaper path so the ranking work stays the star.
+- Changes to the existing sync pipeline (likes ingest, publisher discovery, document embedding). Those are orthogonal.
+- Fixing the pre-existing scaling bugs documented in `memory/project_embed_scaling.md`. Still scoped to their own future PR.
+
+## Architecture
+
+### Variant model
+
+A variant is the tuple of everything that differs between the three sites:
+
+```ts
+// src/variants.ts
+
+export type RankingStrategy =
+  | { kind: "topN" }
+  | { kind: "mmr"; lambda: number; candidatePool: number }
+  | { kind: "placeholder" };
+// Future: | { kind: "antiTopN" } | { kind: "random" } | etc.
+
+export type Variant = {
+  key: "standard" | "nonstandard" | "substandard";
+  hostname: string;
+  brand: {
+    hex: string;                          // primary accent color
+    blobs: [string, string, string, string]; // 4 atmospheric blob colors
+  };
+  copy: {
+    title: string;
+    tagline: string;
+    placeholder: string;
+    recsHeading: (handle: string) => string;
+    footer: string;
+  };
+  ranking: RankingStrategy;
+};
+
+export const VARIANTS: Record<Variant["key"], Variant> = {
+  standard: { /* existing look + top-N ranking */ },
+  nonstandard: { /* slate-blue theme + MMR ranking */ },
+  substandard: { /* olive-yellow theme + placeholder */ },
+};
+
+export const HOSTNAME_TO_VARIANT: Record<string, Variant["key"]> = {
+  "standardrecs.site": "standard",
+  "nonstandardrecs.site": "nonstandard",
+  "substandardrecs.site": "substandard",
+};
+
+export function variantFromHost(host: string | undefined): Variant {
+  const key = (host && HOSTNAME_TO_VARIANT[host]) ?? "standard";
+  return VARIANTS[key];
+}
+```
+
+Unknown hostnames default to `standard` so a misrouted request can't 404 the Worker off the air.
+
+### Hostname routing via Hono middleware
+
+`src/api/routes.ts` gains a middleware that runs before all downstream handlers:
+
+```ts
+api.use("*", async (c, next) => {
+  const variant = variantFromHost(c.req.header("host"));
+  c.set("variant", variant);
+  await next();
+});
+```
+
+Downstream handlers read the variant via `c.get("variant")`:
+
+```ts
+api.get("/", (c) => c.html(enrollPage(c.get("variant"))));
+api.get("/recs/:did", async (c) => { /* select where variant = c.get("variant").key */ });
+```
+
+The variant-awareness is concentrated in the middleware — the actual handlers only care about the variant at two points (which page template to call, which D1 rows to SELECT). Adding a fourth variant later doesn't require touching the handlers at all, only `variants.ts` and the wrangler routes.
+
+### Cloudflare routing
+
+`wrangler.toml` gets two new `[[routes]]` blocks alongside the existing `standardrecs.site` route:
+
+```toml
+[[routes]]
+pattern = "standardrecs.site"
+custom_domain = true
+
+[[routes]]
+pattern = "nonstandardrecs.site"
+custom_domain = true
+
+[[routes]]
+pattern = "substandardrecs.site"
+custom_domain = true
+```
+
+All three subdomains are already on Cloudflare DNS under the same account as the Worker, so `custom_domain = true` auto-provisions certs and CNAME records on deploy. Single Worker script, three routed hostnames. The first deploy can take ~60 seconds to fully propagate the certs — transient 522s during that window are expected and self-heal.
+
+### Schema change
+
+One `ALTER TABLE` plus one new index:
+
+```sql
+-- schema.sql
+
+ALTER TABLE recommendations ADD COLUMN variant TEXT NOT NULL DEFAULT 'standard';
+CREATE INDEX IF NOT EXISTS idx_recs_did_variant ON recommendations(did, variant);
+```
+
+Existing rows pick up `'standard'` via the default — no data loss, no backfill script. The PK stays `(did, document_uri)`:
+
+- MMR explicitly excludes the standard top-12 from the nonstandard candidate pool, so no document appears in both standard and nonstandard for the same user in the same run.
+- Anti-recs draw from the tail of the cosine ranking, disjoint from the top-12.
+- If a future variant wants overlap, revisit then. YAGNI.
+
+The new index makes `SELECT ... WHERE did = ? AND variant = ?` cheap. Without it, every recs request would scan the user's whole rec history across all variants.
+
+### Data flow (request time)
+
+1. Request arrives at Worker via one of the three routed hostnames.
+2. Hono middleware reads `host`, looks up the matching `Variant`, stores it on the request context.
+3. Route handler (`/`, `/recs/:did`, `/enroll`) reads `c.get("variant")`.
+4. For `/recs/:did`: SQL adds `WHERE r.variant = ?` bound to `variant.key`.
+5. Page renderer (`enrollPage(variant)` or `recsPage({ ..., variant })`) interpolates variant copy and emits a `<style>:root { --variant-brand: …; --variant-blob-1: …; … }</style>` block so the theme applies.
+
+### Data flow (cron time)
+
+1. Existing sync → embed → recommend pipeline runs.
+2. `generateUserRecommendations(user)` fetches taste vector (unchanged).
+3. Vectorize query — **changes**: `topK: 50` (was `Math.min(topN * 2, 50)`), `returnValues: true` (was `false`). The extra bandwidth is needed because MMR's pairwise similarity check needs the candidate vectors.
+4. Standard top-12 = first 12 valid matches by raw cosine (current behavior, just at the top of the 50-element list).
+5. Nonstandard top-12 = `pickMMR(candidates[12:], seed=standard[0:12], taste, k=12, lambda=0.6)`.
+6. Substandard: skipped (ranking strategy is `placeholder`).
+7. D1 batch: one `DELETE WHERE did = ?` wipes both variants, then `INSERT` rows for standard and nonstandard with explicit `variant` values.
+8. Returns `{ standard: 12, nonstandard: 12 }`.
+
+## MMR ranking
+
+New helper in `src/recommend/mmr.ts`, single pure function:
+
+```ts
+/**
+ * Pick k items from candidates using Maximal Marginal Relevance.
+ *
+ * mmr_score(c) = lambda * cosine(c, taste)
+ *              - (1 - lambda) * max_over_picked(cosine(c, picked))
+ *
+ * lambda=1 → ignore diversity (= top-k by relevance).
+ * lambda=0 → maximize diversity from picked, ignore relevance.
+ * lambda~0.6 → "trust us" sweet spot: still close to taste, but
+ *              avoids the cluster centers already shown in `seed`.
+ *
+ * The `picked` set grows as each new pick is added, so the returned
+ * items are also diverse from each other — not just from the seed.
+ */
+export function pickMMR(
+  candidates: VectorizeMatch[],
+  seed: VectorizeMatch[],
+  tasteVector: number[],
+  k: number,
+  lambda: number,
+): VectorizeMatch[] {
+  const picked = [...seed];
+  const result: VectorizeMatch[] = [];
+  const remaining = [...candidates];
+
+  while (result.length < k && remaining.length > 0) {
+    let bestIdx = -1;
+    let bestScore = -Infinity;
+
+    for (let i = 0; i < remaining.length; i++) {
+      const cVec = remaining[i].values!;
+      const relevance = dot(cVec, tasteVector);
+      let maxSim = 0;
+      for (const p of picked) {
+        const sim = dot(cVec, p.values!);
+        if (sim > maxSim) maxSim = sim;
+      }
+      const score = lambda * relevance - (1 - lambda) * maxSim;
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = i;
+      }
+    }
+
+    if (bestIdx < 0) break;
+    const winner = remaining.splice(bestIdx, 1)[0];
+    result.push(winner);
+    picked.push(winner);
+  }
+
+  return result;
+}
+
+function dot(a: number[], b: number[]): number {
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += a[i] * b[i];
+  return s;
+}
+```
+
+**Why `dot` and not a full cosine formula:** Voyage embeddings are already L2-normalized, so `dot(a, b) === cosine(a, b)`. No need to renormalize per call.
+
+**Complexity:** O(k × |candidates| × |picked|) ≈ 12 × 38 × 24 ≈ 11k dot products of 1024-dim vectors ≈ ~10M FLOPs per user per cron. Microseconds on a Worker.
+
+**Score stored in D1:** the raw cosine (`dot(c, tasteVector)` for each picked candidate), *not* the MMR score. The MMR score is a transient picking metric — only meaningful relative to other candidates in the same pass. The raw cosine is what's meaningful at display time (the "87% match" chip on the recs card).
+
+**λ selection:** default `0.6`. Configurable via a new env var `MMR_LAMBDA` so tuning doesn't require a redeploy. Parsed with a safe fallback:
+
+```ts
+const raw = parseFloat(env.MMR_LAMBDA ?? "0.6");
+const lambda = Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.6;
+```
+
+## Theming
+
+The existing templates use CSS custom properties for text colors (`--paper`, `--ink`, etc.) but hardcode the blob palette inline. Refactor:
+
+```css
+:root {
+  --variant-brand: #d99566;
+  --variant-blob-1: #d99566;
+  --variant-blob-2: #7e9eba;
+  --variant-blob-3: #a78bfa;
+  --variant-blob-4: #d8a18b;
+}
+```
+
+The default values in `:root` match the existing standard palette — a misrouted request still renders correctly. At render time, the page function injects a `<style>:root { /* variant overrides */ }</style>` block derived from `variant.brand`.
+
+Inline `fill="#d99566"` attributes in the SVG blob field become `fill="var(--variant-blob-1)"`. About 30 minutes of mechanical refactor, split roughly evenly between `enroll-page.ts` and `recs-page.ts`.
+
+**Placeholder blob palettes** (exact hexes to be tuned at implementation time):
+
+| Variant | Brand hex | Mood |
+|---|---|---|
+| standard | `#d99566` (warm amber) | Existing — don't change |
+| nonstandard | `#7e9eba` (slate-blue) | Cool, contemplative, "trust us" |
+| substandard | `#a8b87c` (olive-yellow) | Sickly, off, "you've been warned" |
+
+## Page templates become functions
+
+Today both templates are top-level string constants. After the refactor:
+
+```ts
+// enroll-page.ts
+export function enrollPage(variant: Variant): string {
+  return `<!DOCTYPE html>...${variant.copy.title}...`;
+}
+
+// recs-page.ts
+export type RecsPageData =
+  | { state: "found"; handle: string; did: string; recs: Rec[]; variant: Variant }
+  | { state: "not_found"; variant: Variant }
+  | { state: "placeholder"; variant: Variant };
+
+export function recsPage(data: RecsPageData): string {
+  // dispatch on state, render with data.variant for theme + copy
+}
+```
+
+The route handlers pass `c.get("variant")` into these functions. Interpolated string templates cost microseconds — no meaningful overhead vs. a constant.
+
+## Per-variant copy
+
+Lives entirely in `VARIANTS`:
+
+| Field | standard | nonstandard | substandard |
+|---|---|---|---|
+| `title` | `standard-recs` | `nonstandard-recs` | `substandard-recs` |
+| `tagline` | "Discover Standard.site writing based on what you like on Bluesky." | "You'd never pick this. Trust us." | "You'll hate these." |
+| `placeholder` | "Start typing your handle…" | "Start typing your handle…" | "Don't say I didn't warn you…" |
+| `recsHeading` | `Recs for @${h}` | `Adjacent picks for @${h}` | `Anti-recs for @${h}` |
+| `footer` | "Powered by Standard.site" | "An experiment by standard-recs" | "An experiment by standard-recs" |
+
+Final copy is locked at implementation time. These are the working strings.
+
+## Substandardrecs: placeholder state
+
+Substandardrecs is **fully registered** in `VARIANTS`, routed via `wrangler.toml`, and rendered with its own brand colors and copy. The ranking strategy is `{ kind: "placeholder" }` and `generateUserRecommendations()` skips substandard — no rows are written.
+
+The recs page handles the empty case (zero rows returned from the variant SELECT) with a third discriminated state, `placeholder`, that renders an empty-card hero with the variant's tagline + a "check back soon" line, styled like the existing not-found card but with substandard's colors. Visiting `substandardrecs.site/` shows the landing page with its "You'll hate these" tagline. Visiting `substandardrecs.site/recs/<did>` shows the placeholder.
+
+When the real ranking strategy is picked (follow-up spec), the change is:
+
+1. One new arm in the `RankingStrategy` union (e.g., `{ kind: "antiTopN" }` or `{ kind: "random" }`).
+2. One new branch in `generateUserRecommendations()` that generates substandard rows.
+3. One field flip in `VARIANTS.substandard.ranking`.
+
+No changes to the middleware, the routing, the schema, the page templates, or the theming. That's the payoff of designing the infrastructure as a cohesive variant system instead of bolting on nonstandardrecs alone.
+
+## File structure
+
+| File | Status | Responsibility |
+|---|---|---|
+| `src/variants.ts` | **new** | `Variant` type, `RankingStrategy` union, `VARIANTS` registry, `HOSTNAME_TO_VARIANT`, `variantFromHost()` helper |
+| `src/recommend/mmr.ts` | **new** | `pickMMR()` pure function plus `dot()` helper |
+| `src/recommend/index.ts` | modify | `generateUserRecommendations()` computes all enabled variants in one pass, bumps Vectorize query to `topK: 50` and `returnValues: true`, batches all variant inserts |
+| `src/api/routes.ts` | modify | New variant middleware, `/recs/:did` SQL gains `WHERE variant = ?`, enroll and recs handlers call page renderers with `c.get("variant")` |
+| `src/api/enroll-page.ts` | modify | `enrollPage` becomes a function taking `Variant`, CSS refactor to use `--variant-*` custom properties, variant copy interpolated into template |
+| `src/api/recs-page.ts` | modify | `recsPage` becomes a function taking `Variant` via `RecsPageData`, new `placeholder` state, CSS refactor matching enroll-page |
+| `src/env.ts` | modify | New `MMR_LAMBDA: string` binding |
+| `schema.sql` | modify | `ALTER TABLE recommendations ADD COLUMN variant ...` + new index |
+| `wrangler.toml` | modify | Two new `[[routes]]` blocks, one new var `MMR_LAMBDA = "0.6"` |
+
+Net: two new files, seven modified files, one schema migration.
+
+## Configuration reference
+
+**New env var:**
+
+```toml
+MMR_LAMBDA = "0.6"
+```
+
+Range: `[0, 1]`. Parsed with fallback to `0.6` if missing or invalid. Post-launch tuning doesn't require a redeploy — flip the var in wrangler.toml and run `npm run deploy`, or set via `wrangler deploy` flags.
+
+**New routes:**
+
+```toml
+[[routes]]
+pattern = "nonstandardrecs.site"
+custom_domain = true
+
+[[routes]]
+pattern = "substandardrecs.site"
+custom_domain = true
+```
+
+**Schema migration** (applied once via `npm run db:init`):
+
+```sql
+ALTER TABLE recommendations ADD COLUMN variant TEXT NOT NULL DEFAULT 'standard';
+CREATE INDEX IF NOT EXISTS idx_recs_did_variant ON recommendations(did, variant);
+```
+
+## Testing and verification
+
+No test runner is configured for this project. Verification relies on typechecking, bundling, and manual post-deploy smoke testing.
+
+**Pre-deploy checks:**
+
+1. `npx tsc --noEmit` — typecheck clean.
+2. `npx wrangler deploy --dry-run --outdir=/tmp/wrangler-dryrun` — validates the bundle, bindings, and routes without actually deploying. Confirms all three `[[routes]]` entries parse and the new `MMR_LAMBDA` var shows up in the bindings table.
+
+**Deploy sequence:**
+
+1. Apply schema: `npm run db:init`.
+2. Deploy: `npm run deploy`.
+3. Trigger a full sync so the new variant rows get written: `curl -X POST https://standardrecs.site/admin/sync`.
+
+**Post-deploy smoke tests:**
+
+```bash
+# Each landing page should return the right title + tagline:
+curl -s https://standardrecs.site/    | grep -oE '<title>[^<]*</title>'
+curl -s https://nonstandardrecs.site/ | grep -oE '<title>[^<]*</title>'
+curl -s https://substandardrecs.site/ | grep -oE '<title>[^<]*</title>'
+
+# After sync completes, each recs page should return rows (substandard shows placeholder):
+curl -sL https://standardrecs.site/recs/<your-did>
+curl -sL https://nonstandardrecs.site/recs/<your-did>
+curl -sL https://substandardrecs.site/recs/<your-did>
+```
+
+Eyeball-compare the standard and nonstandard rec lists. The nonstandard list should:
+
+- Contain *different* documents than the standard list (MMR explicitly excludes the top-12).
+- Still feel plausibly connected to your taste (since λ=0.6 keeps relevance weighted).
+- Feel more spread-out across topics than the standard list (the whole point of MMR's diversity term).
+
+**Optional debugging:** extend `/admin/compare-recs` (already exists from PR #18) to accept `?variants=standard,nonstandard` so the same endpoint can compare variants side-by-side for a single DID. Useful for tuning λ post-launch without redeploying.
+
+**Rollback:**
+
+1. Revert the PR. Worker reverts to pre-variant code on next deploy.
+2. The `variant` column stays on the table (harmless — it defaults to `'standard'`). If cleanup is desired, `ALTER TABLE recommendations DROP COLUMN variant` is supported in D1 (SQLite 3.35+).
+3. The two extra `[[routes]]` blocks remain in `wrangler.toml` history but the Worker no longer matches the variant. Removing them is a one-line revert.
+
+## Open questions / deferred
+
+- **Substandardrecs ranking algorithm.** Three serious candidates: (a) negate the taste vector and re-query Vectorize for nearest, (b) sort the full topK=50 ASC and take the bottom, (c) literal `SELECT ... ORDER BY random() LIMIT 12`. Each has a different "feel." Worth prototyping all three via the extended compare-recs endpoint before picking. Own spec.
+- **Per-variant analytics.** Are nonstandard recs actually getting clicked? Would want variant-tagged click events. Not part of this spec — revisit once there's a sense of whether the nonstandard list *feels* right.
+- **Does `MMR_LAMBDA = 0.6` actually produce the right vibe?** Only way to know is to run it and look. Tuning post-launch via the env var is the expected path. If 0.5 or 0.7 turn out to be better, the env var flip is a one-line commit.
+- **Should the nonstandardrecs page explain what it's doing?** Right now the plan is to just show the recs with a distinct tagline and let the user figure it out. An inline "About this list" footer link could explain MMR/diversity in plain English if the mystery gets annoying.
+- **Publisher diversity as a secondary signal.** MMR currently only penalizes by embedding similarity. A more sophisticated version could also penalize against "same publisher as an already-picked doc," which would force cross-publisher variety even when two different publishers happen to write about the same topic. Interesting but not obviously worth it — deferred.
+
+## Not in this spec
+
+- **Fixing the pre-existing embed scaling bug** (caps at 500 likes per run, re-embeds hot rows every cron). Tracked in `memory/project_embed_scaling.md`, will be its own PR after the variant system ships.
+- **Changing Voyage model or dimensionality.** The current `voyage-3.5-lite` + 1024 dims is fine for the existing pipeline and MMR works on whatever embedding space the documents already live in.
+- **Cleanup of the `likes_doc` namespace and the dormant document-embedding plumbing from PR #18.** Intentionally left in place so future ranking experiments (including but not limited to this one) can reuse the infrastructure. Not part of this spec.
+
+---
+
+## Approval trail
+
+- **Bryan** approved the system shape (variant abstraction, Hono middleware routing, schema change as one-shot `ALTER TABLE`, `RankingStrategy` discriminated union) on 2026-04-13.
+- **Bryan** approved the ranking pipeline (MMR with λ=0.6 env var, `returnValues: true` on the Vectorize query, substandard ships as a placeholder) on 2026-04-13.
+- **Bryan** approved the presentation and config (brand-color theming via CSS custom properties, page templates become functions, three `[[routes]]` entries in `wrangler.toml`, all on the same Worker) on 2026-04-13.
