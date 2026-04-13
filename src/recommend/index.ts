@@ -63,6 +63,7 @@ export async function generateUserRecommendations(
   did: string,
   topN: number,
   likesNamespace: string = LIKES_NAMESPACE_QUERY,
+  dryRun: boolean = false,
 ): Promise<Recommendation[]> {
   // 1. Get this user's like URIs from D1 (ordered by recency)
   const { results: likes } = await db
@@ -136,7 +137,7 @@ export async function generateUserRecommendations(
       score: match.score,
     }));
 
-  if (recs.length > 0) {
+  if (recs.length > 0 && !dryRun) {
     // Clear old recs and insert new ones
     const stmts: D1PreparedStatement[] = [
       db.prepare(`DELETE FROM recommendations WHERE did = ?`).bind(did),

@@ -252,11 +252,9 @@ api.post("/admin/sync-user/:did", async (c) => {
 });
 
 // Compare recommendations between the two like-embedding namespaces.
-//
-// POST, not GET — generateUserRecommendations writes the recs to D1
-// (DELETE + INSERT for the user). A side-effecty GET would let link
-// previewers, browser prefetching, and accidental address-bar visits
-// silently mutate state.
+// POST because generateUserRecommendations *can* write to D1 — we pass
+// dryRun=true here so this endpoint computes both rec lists without
+// touching the persisted recommendations table.
 api.post("/admin/compare-recs", async (c) => {
   const did = c.req.query("did");
   if (!did) {
@@ -265,17 +263,13 @@ api.post("/admin/compare-recs", async (c) => {
 
   const topN = parseInt(c.env.TOP_N ?? "10", 10) || 10;
 
-  // Sequential, not Promise.all: both calls write to D1, and the order
-  // matters. The second call (docRecs) wins, so after this endpoint runs
-  // the persisted recs for `did` are the document-namespace results.
-  // Do not reorder or parallelize without changing how persistence is
-  // handled (e.g., adding a dryRun flag to generateUserRecommendations).
   const queryRecs = await generateUserRecommendations(
     c.env.DB,
     c.env.VECTORS,
     did,
     topN,
     LIKES_NAMESPACE_QUERY,
+    true, // dryRun
   );
   const docRecs = await generateUserRecommendations(
     c.env.DB,
@@ -283,6 +277,7 @@ api.post("/admin/compare-recs", async (c) => {
     did,
     topN,
     LIKES_NAMESPACE_DOC,
+    true, // dryRun
   );
 
   // Enrich each rec with the document metadata so the comparison is readable.
