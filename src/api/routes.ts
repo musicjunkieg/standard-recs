@@ -41,7 +41,7 @@ api.use("*", async (c, next) => {
 // ─── Public ───
 
 // Enrollment page
-api.get("/", (c) => c.html(enrollPage));
+api.get("/", (c) => c.html(enrollPage(c.get("variant"))));
 
 // API info
 api.get("/api", (c) => {
