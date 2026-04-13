@@ -14,11 +14,13 @@ import {
   LIKES_NAMESPACE_DOC,
   LIKES_DOC_ID_PREFIX,
 } from "./embed.js";
+import { pickMMR } from "./mmr.js";
 
 type Recommendation = {
   did: string;
   document_uri: string;
   score: number;
+  variant: "standard" | "nonstandard";
 };
 
 /**
@@ -29,6 +31,7 @@ export async function generateAllRecommendations(
   vectors: VectorizeIndex,
   topN: number,
   likesNamespace: string = LIKES_NAMESPACE_QUERY,
+  lambda: number = 0.6,
 ): Promise<number> {
   const { results: users } = await db
     .prepare(`SELECT did FROM users`)
@@ -44,6 +47,8 @@ export async function generateAllRecommendations(
         user.did,
         topN,
         likesNamespace,
+        false,    // dryRun — workflow path always persists
+        lambda,
       );
       totalRecs += recs.length;
     } catch (err) {
@@ -64,6 +69,7 @@ export async function generateUserRecommendations(
   topN: number,
   likesNamespace: string = LIKES_NAMESPACE_QUERY,
   dryRun: boolean = false,
+  lambda: number = 0.6,
 ): Promise<Recommendation[]> {
   // 1. Get this user's like URIs from D1 (ordered by recency)
   const { results: likes } = await db
@@ -112,41 +118,66 @@ export async function generateUserRecommendations(
   const tasteVector = computeTasteVector(likeVectors, likeHashToTimestamp);
 
   // 4. Query Vectorize for nearest documents.
-  // returnMetadata must be "all" (not "indexed") because the uri field
-  // is stored in metadata but not registered as a metadata index.
-  // "all" limits topK to 50 per Cloudflare docs. Clamp to stay under.
-  const topK = Math.min(topN * 2, 50);
+  // Fixed topK=50 (Vectorize per-query cap with returnMetadata="all").
+  // returnValues=true is required so pickMMR can do pairwise vector
+  // comparisons for the nonstandard diversity term. ~250KB per user
+  // per cron — fine at any reasonable scale.
+  const CANDIDATE_POOL = 50;
   const matches = await vectors.query(tasteVector, {
-    topK,
+    topK: CANDIDATE_POOL,
     namespace: "documents",
-    returnValues: false,
+    returnValues: true,
     returnMetadata: "all",
   });
 
-  // 5. Store top-N in D1 — match.id is a hash, so read the original URI
-  // from metadata. Filter THEN slice so we always get up to topN valid recs.
-  const recs: Recommendation[] = matches.matches
-    .filter((match) => {
-      const uri = (match.metadata as { uri?: string } | null)?.uri;
-      return !!uri;
-    })
-    .slice(0, topN)
-    .map((match) => ({
-      did,
-      document_uri: (match.metadata as { uri: string }).uri,
-      score: match.score,
-    }));
+  // 5a. Filter to valid matches (those with a uri in metadata).
+  const validMatches = matches.matches.filter((match) => {
+    const uri = (match.metadata as { uri?: string } | null)?.uri;
+    return !!uri;
+  });
+
+  // 5b. Standard recs: top-N by raw cosine, same as before.
+  const standardMatches = validMatches.slice(0, topN);
+  const standardRecs: Recommendation[] = standardMatches.map((match) => ({
+    did,
+    document_uri: (match.metadata as { uri: string }).uri,
+    score: match.score,
+    variant: "standard" as const,
+  }));
+
+  // 5c. Nonstandard recs: MMR over the remaining candidates, with the
+  // standard top-N as the seed set (diversify against what standard
+  // already picked). The `lambda` parameter is threaded in from the
+  // function signature — the workflow layer reads MMR_LAMBDA env var
+  // and passes it through.
+  const nonstandardMatches = pickMMR(
+    validMatches.slice(topN),
+    standardMatches,
+    tasteVector,
+    topN,
+    lambda,
+  );
+  const nonstandardRecs: Recommendation[] = nonstandardMatches.map((match) => ({
+    did,
+    document_uri: (match.metadata as { uri: string }).uri,
+    score: match.score,
+    variant: "nonstandard" as const,
+  }));
+
+  const recs: Recommendation[] = [...standardRecs, ...nonstandardRecs];
 
   if (recs.length > 0 && !dryRun) {
-    // Clear old recs and insert new ones
+    // Clear all existing variants for this user, then insert the new ones.
+    // The single DELETE wipes both standard and nonstandard in one statement
+    // so the writer doesn't need to know which variants exist.
     const stmts: D1PreparedStatement[] = [
       db.prepare(`DELETE FROM recommendations WHERE did = ?`).bind(did),
       ...recs.map((r) =>
         db
           .prepare(
-            `INSERT INTO recommendations (did, document_uri, score) VALUES (?, ?, ?)`,
+            `INSERT INTO recommendations (did, document_uri, score, variant) VALUES (?, ?, ?, ?)`,
           )
-          .bind(r.did, r.document_uri, r.score),
+          .bind(r.did, r.document_uri, r.score, r.variant),
       ),
     ];
     await db.batch(stmts);
