@@ -21,6 +21,15 @@ type Recommendation = {
   document_uri: string;
   score: number;
   variant: "standard" | "nonstandard";
+  /**
+   * Zero-indexed position within this variant's list, preserving the
+   * algorithm's original pick order. For standard this is just top-N by
+   * raw cosine. For nonstandard this is the MMR greedy pick order:
+   * rank 0 = first pick (no diversity penalty), rank k = pick after
+   * penalizing for similarity to picks 0..k-1. Sorting by score DESC
+   * would scramble the nonstandard order into a different ranking.
+   */
+  rank: number;
 };
 
 /**
@@ -153,11 +162,12 @@ export async function generateUserRecommendations(
 
   // 5b. Standard recs: top-N by raw cosine, same as before.
   const standardMatches = validMatches.slice(0, topN);
-  const standardRecs: Recommendation[] = standardMatches.map((match) => ({
+  const standardRecs: Recommendation[] = standardMatches.map((match, i) => ({
     did,
     document_uri: (match.metadata as { uri: string }).uri,
     score: match.score,
     variant: "standard" as const,
+    rank: i,
   }));
 
   // 5c. Nonstandard recs: MMR over the tail of the candidate pool
@@ -194,11 +204,16 @@ export async function generateUserRecommendations(
     topN,
     lambda,
   );
-  const nonstandardRecs: Recommendation[] = nonstandardMatches.map((match) => ({
+  // The .map index IS the MMR pick order because pickMMR returns
+  // winners in selection order (first pick = rank 0, second pick =
+  // rank 1, etc.). Persist this as the `rank` column so the read path
+  // can ORDER BY rank ASC and preserve MMR's greedy decisions.
+  const nonstandardRecs: Recommendation[] = nonstandardMatches.map((match, i) => ({
     did,
     document_uri: (match.metadata as { uri: string }).uri,
     score: match.score,
     variant: "nonstandard" as const,
+    rank: i,
   }));
 
   const recs: Recommendation[] = [...standardRecs, ...nonstandardRecs];
@@ -212,9 +227,9 @@ export async function generateUserRecommendations(
       ...recs.map((r) =>
         db
           .prepare(
-            `INSERT INTO recommendations (did, document_uri, score, variant) VALUES (?, ?, ?, ?)`,
+            `INSERT INTO recommendations (did, document_uri, score, variant, rank) VALUES (?, ?, ?, ?, ?)`,
           )
-          .bind(r.did, r.document_uri, r.score, r.variant),
+          .bind(r.did, r.document_uri, r.score, r.variant, r.rank),
       ),
     ];
     await db.batch(stmts);

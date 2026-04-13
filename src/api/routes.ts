@@ -145,6 +145,13 @@ api.get("/recs/:did", async (c) => {
     });
   }
 
+  // ORDER BY r.rank ASC, not r.score DESC: for standard, rank is the
+  // top-N cosine ordering (equivalent to score DESC), but for
+  // nonstandard, rank preserves the MMR greedy pick order (first pick
+  // = most confident diversity-aware match, last pick = biggest stretch).
+  // Sorting by raw score would scramble the nonstandard list into a
+  // "next 12 by cosine" ranking, discarding the information MMR
+  // encoded in the pick order itself.
   const { results: recs } = await c.env.DB.prepare(
     `SELECT r.document_uri, r.score, r.generated_at,
             d.title, d.description, d.site, d.path, d.tags, d.published_at,
@@ -153,7 +160,7 @@ api.get("/recs/:did", async (c) => {
      JOIN documents d ON r.document_uri = d.uri
      LEFT JOIN publications p ON d.site = p.uri
      WHERE r.did = ? AND r.variant = ?
-     ORDER BY r.score DESC`,
+     ORDER BY r.rank ASC`,
   )
     .bind(did, variant.key)
     .all();

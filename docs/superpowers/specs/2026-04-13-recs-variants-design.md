@@ -365,7 +365,7 @@ No changes to the middleware, the routing, the schema, the page templates, or th
 | `src/api/routes.ts` | modify | New variant middleware, `/recs/:did` SQL gains `WHERE variant = ?`, enroll and recs handlers call page renderers with `c.get("variant")` |
 | `src/api/enroll-page.ts` | modify | `enrollPage` becomes a function taking `Variant`, CSS refactor to use `--variant-*` custom properties, variant copy interpolated into template |
 | `src/api/recs-page.ts` | modify | `recsPage` becomes a function taking `Variant` via `RecsPageData`, new `placeholder` state, CSS refactor matching enroll-page |
-| `src/api/recs-lookup-page.ts` | modify | Accept `Variant` parameter, apply variant theme/copy so the lookup form doesn't feel like a standardrecs page on a nonstandardrecs.site visit. Minimal change (same template-function conversion as the other pages). |
+| `src/api/recs-lookup-page.ts` | modify | Accept `Variant` parameter. **Only `variant.copy.*` threads through** — the h1 title, input placeholder, and footer text change per variant, but the palette, borders, focus states, and overall styling stay on the older warm-cream + Newsreader aesthetic. The `variant.brand` palette/blob colors are **intentionally deferred**: the file has no `:root` block or blob field, and bolting on a partial brand-color treatment would be a half-measure. A proper variant visual identity for this page is a separate spec / follow-up PR that redesigns it to match the glass aesthetic of enroll-page and recs-page. |
 | `src/env.ts` | modify | New `MMR_LAMBDA: string` binding |
 | `schema.sql` | modify | `ALTER TABLE recommendations ADD COLUMN variant ...` + new index |
 | `wrangler.toml` | modify | Two new `[[routes]]` blocks, one new var `MMR_LAMBDA = "0.6"` |

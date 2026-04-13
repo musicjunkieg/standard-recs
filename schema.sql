@@ -88,3 +88,16 @@ CREATE TABLE IF NOT EXISTS oauth_sessions (
 -- for the disjointness invariant that keeps this safe across variants.
 ALTER TABLE recommendations ADD COLUMN variant TEXT NOT NULL DEFAULT 'standard';
 CREATE INDEX IF NOT EXISTS idx_recs_did_variant ON recommendations(did, variant);
+
+-- 2026-04-13 round 3: Add rank column to preserve MMR pick order for
+-- nonstandard recs. Without this, the read path's `ORDER BY score DESC`
+-- re-sorts nonstandard picks by raw cosine, scrambling the deliberate
+-- greedy ordering produced by pickMMR (first pick = best balance of
+-- relevance vs diversity, last pick = biggest trust-us stretch). For
+-- standard, pick order and score DESC order are identical, so this
+-- column is a no-op for standard but load-bearing for nonstandard.
+--
+-- Default 0 means pre-existing rows (all standard pre-refactor) get
+-- rank=0 across the board — fine because they'll be re-written by
+-- the next cron's generateUserRecommendations call anyway.
+ALTER TABLE recommendations ADD COLUMN rank INTEGER NOT NULL DEFAULT 0;
