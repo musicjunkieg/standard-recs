@@ -48,9 +48,17 @@ A variant is the tuple of everything that differs between the three sites:
 
 export type RankingStrategy =
   | { kind: "topN" }
-  | { kind: "mmr"; lambda: number; candidatePool: number }
+  | { kind: "mmr" }
   | { kind: "placeholder" };
 // Future: | { kind: "antiTopN" } | { kind: "random" } | etc.
+//
+// Note: the `mmr` arm does NOT carry `lambda` or `candidatePool`. See
+// src/variants.ts for the authoritative type. MMR_LAMBDA comes from env
+// (parsed by parseMmrLambda in workflow.ts); CANDIDATE_POOL is hardcoded
+// at 50 in src/recommend/index.ts because it's pinned by Vectorize's
+// per-query cap with returnMetadata="all". Adding those as per-variant
+// knobs would require wiring them through the recommend flow with env
+// fallback — deferred until a variant actually needs different values.
 
 export type Variant = {
   key: "standard" | "nonstandard" | "substandard";
@@ -221,7 +229,13 @@ export function pickMMR(
     for (let i = 0; i < remaining.length; i++) {
       const cVec = remaining[i].values!;
       const relevance = dot(cVec, tasteVector);
-      let maxSim = 0;
+      // When picked is empty (only possible if seed was also empty),
+      // collapse to pure relevance. Otherwise seed maxSim to -Infinity
+      // so negative cosines (semantically opposed items) still count
+      // toward the diversity penalty as required by the published
+      // MMR formula. Clamping to 0 would silently mute the bonus for
+      // anti-correlated items.
+      let maxSim = picked.length > 0 ? -Infinity : 0;
       for (const p of picked) {
         const sim = dot(cVec, p.values!);
         if (sim > maxSim) maxSim = sim;

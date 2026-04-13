@@ -173,10 +173,24 @@ export async function generateUserRecommendations(
   // re-ranks over the full validMatches must either (a) preserve this
   // disjointness invariant or (b) update the schema PK first.
   // See: docs/superpowers/specs/2026-04-13-recs-variants-design.md
+  //
+  // L2-normalize the taste vector before feeding it to MMR: the
+  // Voyage embeddings in `validMatches` are already unit vectors, so
+  // pickMMR's diversity term `dot(cVec, p.values!)` produces true
+  // cosines in [-1, 1]. But `computeTasteVector` returns a weighted
+  // *average* (not a unit vector), so `dot(cVec, tasteVector)` would
+  // be scaled by |tasteVector| — typically 0.5-0.9 for likes spanning
+  // multiple topics. That scale mismatch compresses the relevance
+  // term relative to the diversity penalty, skewing MMR's balance
+  // away from the intended lambda. Normalize here so both terms live
+  // on the same [-1, 1] cosine scale. (Vectorize's own query() call
+  // above doesn't need this because Cloudflare handles the scaling
+  // internally for cosine similarity ordering.)
+  const tasteVectorNormalized = normalizeL2(tasteVector);
   const nonstandardMatches = pickMMR(
     validMatches.slice(topN),
     standardMatches,
-    tasteVector,
+    tasteVectorNormalized,
     topN,
     lambda,
   );
@@ -261,4 +275,25 @@ function computeTasteVector(
   }
 
   return Array.from(sum);
+}
+
+/**
+ * L2-normalize a vector to unit length. Returns the original vector
+ * unchanged if its norm is zero (degenerate case — shouldn't happen
+ * in practice because `computeTasteVector` rejects vectors with zero
+ * total weight, but defensive).
+ *
+ * Used before passing the taste vector into MMR, so the relevance
+ * term `dot(cVec, taste)` produces true cosines matching the
+ * diversity term's `dot(cVec, picked)` scale. See the call site in
+ * `generateUserRecommendations` for the full rationale.
+ */
+function normalizeL2(v: number[]): number[] {
+  let sum = 0;
+  for (let i = 0; i < v.length; i++) sum += v[i] * v[i];
+  const norm = Math.sqrt(sum);
+  if (norm === 0) return v;
+  const out = new Array<number>(v.length);
+  for (let i = 0; i < v.length; i++) out[i] = v[i] / norm;
+  return out;
 }

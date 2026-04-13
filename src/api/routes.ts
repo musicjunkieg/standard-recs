@@ -399,8 +399,16 @@ api.post("/admin/compare-recs", async (c) => {
     return c.json({ did, lambda, topN, variants: enrichedVariants });
   }
 
-  // Existing branch: namespace comparison (unchanged — supports PR #18 usage).
-  const [queryRecs, docRecs] = await Promise.all([
+  // Existing branch: namespace comparison (supports PR #18 usage).
+  //
+  // Note: after Task 6's refactor, generateUserRecommendations returns
+  // BOTH variants (standard + nonstandard) in one call, so each of the
+  // two calls below returns 2 * topN rows. The legacy PR #18 response
+  // shape is "top-N per namespace," matching the standard ranking
+  // (top-N by raw cosine). Filter each call's result to just the
+  // .variant === "standard" rows before enrichment so the response
+  // shape stays exactly what PR #18 consumers expect.
+  const [allQueryRecs, allDocRecs] = await Promise.all([
     generateUserRecommendations(
       c.env.DB,
       c.env.VECTORS,
@@ -418,6 +426,8 @@ api.post("/admin/compare-recs", async (c) => {
       true, // dryRun
     ),
   ]);
+  const queryRecs = allQueryRecs.filter((r) => r.variant === "standard");
+  const docRecs = allDocRecs.filter((r) => r.variant === "standard");
 
   // Enrich each rec with document metadata. Mirrors the join the public
   // /recs/:did route uses: documents has no `url` column — the resolved
