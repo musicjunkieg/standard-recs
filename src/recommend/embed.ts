@@ -21,6 +21,7 @@ export const VOYAGE_API = "https://api.voyageai.com/v1/embeddings";
 export const VOYAGE_MODEL = "voyage-3.5-lite";
 export const EMBEDDING_DIMENSIONS = 1024;
 const BATCH_SIZE = 100;
+const DEFAULT_EMBED_BATCH_LIMIT = 2000;
 
 export const LIKES_NAMESPACE_QUERY = "likes";
 export const LIKES_NAMESPACE_DOC = "likes_doc";
@@ -43,57 +44,6 @@ type EmbedResult = {
   errors: number;
 };
 
-/**
- * Embed likes into the specified namespace(s).
- */
-async function embedLikesIntoNamespace(
-  vectors: VectorizeIndex,
-  apiKey: string,
-  rows: Array<{ uri: string; liked_post_text: string }>,
-  inputType: "query" | "document",
-  namespace: string,
-  idPrefix: string,
-): Promise<{ embedded: number; errors: number }> {
-  if (rows.length === 0) return { embedded: 0, errors: 0 };
-
-  let embedded = 0;
-  let errors = 0;
-  const batches = chunk(rows, BATCH_SIZE);
-
-  for (const batch of batches) {
-    try {
-      const texts = batch.map((l) => l.liked_post_text);
-      const embeddings = await getEmbeddings(texts, apiKey, inputType);
-
-      if (embeddings.length !== texts.length) {
-        throw new Error(
-          `Voyage returned ${embeddings.length} embeddings for ${texts.length} inputs`,
-        );
-      }
-
-      const baseIds = await vectorIds(batch.map((l) => l.uri));
-      const ids = baseIds.map((h) => idPrefix + h);
-
-      const vectorBatch: VectorizeVector[] = embeddings.map((values, i) => ({
-        id: ids[i],
-        values,
-        namespace,
-        metadata: { type: "like", uri: batch[i].uri },
-      }));
-
-      await vectors.upsert(vectorBatch);
-      embedded += batch.length;
-    } catch (err) {
-      errors += batch.length;
-      console.error(
-        `Like embedding batch failed (${namespace}):`,
-        truncErr(err),
-      );
-    }
-  }
-
-  return { embedded, errors };
-}
 
 /**
  * Embed all un-embedded likes and documents.
@@ -103,6 +53,7 @@ export async function embedAll(
   vectors: VectorizeIndex,
   apiKey: string,
   embedMode: LikeEmbedMode = "query",
+  embedBatchLimit: number = DEFAULT_EMBED_BATCH_LIMIT,
 ): Promise<EmbedResult> {
   let queryEmbedCount = 0;
   let docEmbedCount = 0;
@@ -113,49 +64,90 @@ export async function embedAll(
   const { results: unembeddedLikes } = await db
     .prepare(
       `SELECT uri, liked_post_text FROM likes
-       WHERE liked_post_text IS NOT NULL AND liked_post_text != ''
+       WHERE liked_post_text IS NOT NULL
+         AND liked_post_text != ''
+         AND embedded_at IS NULL
        ORDER BY liked_at DESC
-       LIMIT 500`,
+       LIMIT ?`,
     )
+    .bind(embedBatchLimit)
     .all<{ uri: string; liked_post_text: string }>();
 
   const wantQuery = embedMode === "query" || embedMode === "both";
   const wantDoc = embedMode === "document" || embedMode === "both";
 
-  if (wantQuery) {
-    const r = await embedLikesIntoNamespace(
-      vectors,
-      apiKey,
-      unembeddedLikes,
-      "query",
-      LIKES_NAMESPACE_QUERY,
-      "",
-    );
-    queryEmbedCount += r.embedded;
-    errors += r.errors;
-  }
+  if (unembeddedLikes.length > 0 && (wantQuery || wantDoc)) {
+    const batches = chunk(unembeddedLikes, BATCH_SIZE);
 
-  if (wantDoc) {
-    const r = await embedLikesIntoNamespace(
-      vectors,
-      apiKey,
-      unembeddedLikes,
-      "document",
-      LIKES_NAMESPACE_DOC,
-      LIKES_DOC_ID_PREFIX,
-    );
-    docEmbedCount += r.embedded;
-    errors += r.errors;
+    for (const batch of batches) {
+      try {
+        const texts = batch.map((l) => l.liked_post_text);
+        const baseIds = await vectorIds(batch.map((l) => l.uri));
+
+        if (wantQuery) {
+          const embeddings = await getEmbeddings(texts, apiKey, "query");
+          if (embeddings.length !== texts.length) {
+            throw new Error(
+              `Voyage returned ${embeddings.length} embeddings for ${texts.length} inputs (query namespace)`,
+            );
+          }
+          const vectorBatch: VectorizeVector[] = embeddings.map((values, i) => ({
+            id: baseIds[i],
+            values,
+            namespace: LIKES_NAMESPACE_QUERY,
+            metadata: { type: "like", uri: batch[i].uri },
+          }));
+          await vectors.upsert(vectorBatch);
+          queryEmbedCount += batch.length;
+        }
+
+        if (wantDoc) {
+          const embeddings = await getEmbeddings(texts, apiKey, "document");
+          if (embeddings.length !== texts.length) {
+            throw new Error(
+              `Voyage returned ${embeddings.length} embeddings for ${texts.length} inputs (doc namespace)`,
+            );
+          }
+          const vectorBatch: VectorizeVector[] = embeddings.map((values, i) => ({
+            id: LIKES_DOC_ID_PREFIX + baseIds[i],
+            values,
+            namespace: LIKES_NAMESPACE_DOC,
+            metadata: { type: "like", uri: batch[i].uri },
+          }));
+          await vectors.upsert(vectorBatch);
+          docEmbedCount += batch.length;
+        }
+
+        // All requested namespaces have successfully upserted this
+        // batch. Stamp the rows now so they don't re-embed on the next
+        // cron. Must be inside the same try as the upserts above — if
+        // any upsert threw, we never reach the stamp and the catch
+        // block leaves embedded_at NULL, preserving the invariant
+        // "embedded_at IS NOT NULL iff in Vectorize."
+        const placeholders = batch.map(() => "?").join(",");
+        await db
+          .prepare(
+            `UPDATE likes SET embedded_at = datetime('now') WHERE uri IN (${placeholders})`,
+          )
+          .bind(...batch.map((l) => l.uri))
+          .run();
+      } catch (err) {
+        errors += batch.length;
+        console.error(`Like embedding batch failed:`, truncErr(err));
+      }
+    }
   }
 
   // --- Documents (embedded as "document") ---
   const { results: docs } = await db
     .prepare(
       `SELECT uri, title, description, text_content FROM documents
-       WHERE (text_content IS NOT NULL AND text_content != '')
-          OR (description IS NOT NULL AND description != '')
-       LIMIT 500`,
+       WHERE ((text_content IS NOT NULL AND text_content != '')
+           OR (description IS NOT NULL AND description != ''))
+         AND embedded_at IS NULL
+       LIMIT ?`,
     )
+    .bind(embedBatchLimit)
     .all<{
       uri: string;
       title: string;
@@ -191,6 +183,17 @@ export async function embedAll(
 
         await vectors.upsert(vectorBatch);
         docCount += batch.length;
+
+        // Stamp the just-embedded documents. Inside the try so upsert-
+        // success/stamp-skip can't happen; stamp-UPDATE-fails-after-upsert-
+        // succeeded is benign (idempotent re-embed next cron).
+        const placeholders = batch.map(() => "?").join(",");
+        await db
+          .prepare(
+            `UPDATE documents SET embedded_at = datetime('now') WHERE uri IN (${placeholders})`,
+          )
+          .bind(...batch.map((d) => d.uri))
+          .run();
       } catch (err) {
         errors += batch.length;
         console.error("Document embedding batch failed:", truncErr(err));
@@ -204,7 +207,8 @@ export async function embedAll(
   console.log(
     `Embedded ${likesProcessed} likes ` +
       `(query=${queryEmbedCount}, doc=${docEmbedCount}), ` +
-      `${docCount} documents (${errors} errors)`,
+      `${docCount} documents (${errors} errors). ` +
+      `Limit: ${embedBatchLimit}.`,
   );
   return { likes: likesProcessed, documents: docCount, errors };
 }
