@@ -8,6 +8,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Env } from "../env.js";
+import { type Variant, variantFromHost } from "../variants.js";
 import { createOAuthClient, buildClientMetadata } from "../oauth/client.js";
 import { AtpAgent } from "@atproto/api";
 
@@ -22,9 +23,20 @@ import { enrollPage } from "./enroll-page.js";
 import { recsPage } from "./recs-page.js";
 import { recsLookupPage } from "./recs-lookup-page.js";
 
-const api = new Hono<{ Bindings: Env }>();
+const api = new Hono<{ Bindings: Env; Variables: { variant: Variant } }>();
 
 api.use("*", cors());
+
+// Variant routing middleware. Reads the Host header and stores the
+// matched Variant on the request context. Every downstream handler
+// reads it via c.get("variant") and doesn't need to know about
+// hostnames. Unknown hosts fall back to "standard" inside
+// variantFromHost so dev mode (localhost:8787) still works.
+api.use("*", async (c, next) => {
+  const variant = variantFromHost(c.req.header("host"));
+  c.set("variant", variant);
+  await next();
+});
 
 // ─── Public ───
 
