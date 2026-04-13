@@ -26,4 +26,5 @@ export type Env = {
   LIKE_EMBED_MODE: string;        // "query" | "document" | "both"
   LIKE_QUERY_NAMESPACE: string;   // "likes" | "likes_doc"
   MMR_LAMBDA: string;             // "0.6" — nonstandardrecs MMR lambda knob
+  EMBED_BATCH_LIMIT: string;
 };
