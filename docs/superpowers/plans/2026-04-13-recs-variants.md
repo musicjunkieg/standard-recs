@@ -1217,32 +1217,48 @@ Immediately after the opening `:root {`, add four new custom properties driven b
 
 Because `:root` is already inside a template literal, the `${variant.brand.hex}` interpolation is automatic. The four new custom properties are always present; unknown variants fall through to `standard` at the middleware layer, so the vars will always resolve.
 
-- [ ] **Step 5: Replace hardcoded blob colors with `var(--variant-blob-N)`**
+- [ ] **Step 5: Parameterize the blob-field colors**
 
-Find the four blob-field CSS rules in the file's `<style>` block. They look roughly like:
+The actual file uses **semantic class names** (`.blob--amber`, `.blob--blue`, `.blob--violet`, `.blob--center`) with **`rgba()` color values** inside `radial-gradient()`, not bare hex codes. Bare hex find-and-replace will find nothing. The approach is a targeted rule-by-rule edit.
+
+First, find the four blob rules in the `<style>` block. They look (roughly) like this in the file today:
 
 ```css
-.blob--1 {
-  background: radial-gradient(circle, #d99566 0%, transparent 60%);
-  /* ...positioning... */
+.blob--amber {
+  width: 500px; height: 400px;
+  background: radial-gradient(circle, rgba(230, 180, 100, 0.6) 0%, rgba(230, 180, 100, 0) 70%);
+  top: 20%; left: 10%;
+  animation-delay: 0s, 1.8s;
 }
-.blob--2 { background: radial-gradient(circle, #7e9eba 0%, transparent 60%); }
-.blob--3 { background: radial-gradient(circle, #a78bfa 0%, transparent 60%); }
-.blob--4 { background: radial-gradient(circle, #d8a18b 0%, transparent 60%); }
+.blob--blue {
+  width: 600px; height: 450px;
+  background: radial-gradient(circle, rgba(147, 197, 253, 0.5) 0%, rgba(147, 197, 253, 0) 70%);
+  ...
+}
+.blob--violet { ... rgba(167, 139, 250, ...) ... }
+.blob--center { ... rgba(255, 230, 180, ...) ... }
 ```
 
-Replace each hardcoded color with the corresponding CSS custom property:
+Do **not** rename the classes or the HTML markup. Do **not** change positioning, sizing, or animation properties. The only edit is the `background: radial-gradient(...)` line inside each of the four `.blob--*` rules. Replace each with the corresponding variant custom property:
 
-```css
-.blob--1 { background: radial-gradient(circle, var(--variant-blob-1) 0%, transparent 60%); /* ... */ }
-.blob--2 { background: radial-gradient(circle, var(--variant-blob-2) 0%, transparent 60%); }
-.blob--3 { background: radial-gradient(circle, var(--variant-blob-3) 0%, transparent 60%); }
-.blob--4 { background: radial-gradient(circle, var(--variant-blob-4) 0%, transparent 60%); }
-```
+| Rule | New `background` value |
+|---|---|
+| `.blob--amber` | `background: radial-gradient(circle, var(--variant-blob-1) 0%, transparent 70%);` |
+| `.blob--blue` | `background: radial-gradient(circle, var(--variant-blob-2) 0%, transparent 70%);` |
+| `.blob--violet` | `background: radial-gradient(circle, var(--variant-blob-3) 0%, transparent 70%);` |
+| `.blob--center` | `background: radial-gradient(circle, var(--variant-blob-4) 0%, transparent 70%);` |
 
-The actual color names / gradient stops / positioning details may differ from the snippet above — don't rewrite the structure, just replace the `#xxxxxx` literals inside the `radial-gradient` calls with `var(--variant-blob-N)`. Use a find-and-replace on the four hex codes listed in `src/variants.ts`'s `standard` entry if that's easier (`#d99566`, `#7e9eba`, `#a78bfa`, `#d8a18b`).
+The variant-to-slot mapping (`amber`→`blob-1`, `blue`→`blob-2`, etc.) is derived from the order in `VARIANTS.standard.brand.blobs` in `src/variants.ts`. Keep the transparent falloff at `70%` — that's the existing fade distance and changing it would shift the visual.
 
-**Also check the focus ring and any accent-colored UI elements.** Search the file for the amber hex `#d99566` or similar brand colors used for focus outlines / button highlights / match-score chips — replace those with `var(--variant-brand)`.
+**Note about alpha:** replacing `rgba(R, G, B, 0.6)` with just `var(--variant-blob-N)` loses the per-blob alpha. The variant palette in `src/variants.ts` uses fully-opaque hex colors, so the visual will be slightly more saturated than before. If the visual feels wrong during smoke test (Task 14), the fix is to add per-blob opacity via a separate CSS custom property (`--variant-blob-1-alpha`) — but that's a follow-up, not part of this task. Don't preemptively add alpha handling.
+
+**Also check the glass-shape tints and other accent colors.** The enroll-page has a `.glass-shape--amber` / `.glass-shape--blue` / `.glass-shape--sage` / `.glass-shape--rose` / `.glass-shape--violet` block lower in the CSS with `rgba()` tints. **Leave these alone** — they're standard-specific accent treatments that don't need to vary per variant. Only the four main atmospheric blobs get parameterized in this task.
+
+**Focus ring / match-score chip check.** Grep the file for `rgba(184, 168, 152, 0.18)` or similar colors used in `.glass-input:focus-within` box-shadow — these are the focus ring colors. **Leave these alone too** — the focus ring uses neutral tones that work with any brand color. The only thing that should move with the variant is the four main blobs.
+
+---
+
+**Summary of Step 5:** edit exactly four lines (the four `background: radial-gradient(...)` declarations inside `.blob--amber`, `.blob--blue`, `.blob--violet`, `.blob--center`). Everything else stays.
 
 - [ ] **Step 6: Replace inline strings with variant copy**
 
@@ -1377,9 +1393,20 @@ Same pattern as Task 8 Step 4. The template's `:root` block gets five new `--var
 
 If the template is split across multiple string fragments for the different states (found/not_found), apply the same `:root` injection to each — or refactor to share a common `<head>` / theme block. Don't over-refactor; the simplest change that gets variant-theming working is to add the injection wherever the `:root` block currently lives.
 
-- [ ] **Step 6: Replace hardcoded blob colors and brand-accent colors**
+- [ ] **Step 6: Parameterize the blob-field colors**
 
-Same pattern as Task 8 Step 5. Search for hex colors (`#d99566`, `#7e9eba`, `#a78bfa`, `#d8a18b`, and the brand accent `#d99566`) and replace with `var(--variant-blob-N)` / `var(--variant-brand)` as appropriate.
+Same approach as Task 8 Step 5, but `recs-page.ts` has a slightly different blob set: `.blob--amber`, `.blob--blue`, `.blob--violet`, `.blob--rose` (rose instead of center). Same `rgba(…)` pattern inside `radial-gradient(…)`.
+
+| Rule | New `background` value |
+|---|---|
+| `.blob--amber` | `background: radial-gradient(circle, var(--variant-blob-1) 0%, transparent 70%);` |
+| `.blob--blue` | `background: radial-gradient(circle, var(--variant-blob-2) 0%, transparent 70%);` |
+| `.blob--violet` | `background: radial-gradient(circle, var(--variant-blob-3) 0%, transparent 70%);` |
+| `.blob--rose` | `background: radial-gradient(circle, var(--variant-blob-4) 0%, transparent 70%);` |
+
+Leave classnames, positioning, sizing, and animations alone. The Step 8 / Task 14 smoke test will catch any visual regressions.
+
+As in Task 8, **do not** touch accent-colored elements like match-score chips, focus rings, or card hover shadows — those use neutral tones and work with any brand color. If the card's top-right hover glow uses `rgba(230, 180, 100, 0.16)` (the amber tint), leave it — it's an intentional warm accent on hover and not worth theming in this task.
 
 - [ ] **Step 7: Replace inline strings with variant copy**
 
@@ -1622,14 +1649,14 @@ api.get("/recs/:did", async (c) => {
 });
 ```
 
-**Important:** the existing handler's exact structure differs from this sketch (different variable names, different user-lookup logic, maybe an intermediate OAuth session check). Do NOT do a wholesale rewrite. Instead:
+**CRITICAL: the sketch above is illustrative, not prescriptive.** The actual existing handler has different variable names, user-lookup logic, possibly intermediate OAuth session state fetches, and other project-specific concerns this plan can't predict. **Do NOT paste the sketch over the existing handler.** Instead, make exactly these four surgical edits to the existing handler:
 
-1. Add `const variant = c.get("variant");` near the top of the handler.
-2. Add the `variant.ranking.kind === "placeholder"` check before the main SELECT.
-3. Modify the existing SELECT to add `AND r.variant = ?` and bind `variant.key` as the second parameter.
-4. Add `variant` to the `recsPage({...})` object at the render sites.
+1. **Add** `const variant = c.get("variant");` near the top (after `const did = c.req.param("did");` or similar).
+2. **Add** a placeholder short-circuit after the user-existence check: `if (variant.ranking.kind === "placeholder") { return c.html(recsPage({ state: "placeholder", variant })); }`
+3. **Modify** the existing `SELECT … FROM recommendations WHERE r.did = ?` query — add `AND r.variant = ?` to the WHERE clause, and add `variant.key` as the second bound parameter.
+4. **Modify** every `recsPage({ state: "...", ... })` call site to include `variant` in the data object (both the `found` case and the `not_found` case).
 
-The surgical edit is: three new lines + one WHERE clause addition + one render-arg addition per state. Do not rewrite the handler.
+The total surgical change is: 2 new lines + 1 new short-circuit block + 1 WHERE clause addition + 1 bound param + `variant` added to each render arg. Everything else — OAuth session handling, existing error paths, logging — stays untouched. If you find yourself deleting existing handler code, you're rewriting; stop and reapply as surgical edits only.
 
 - [ ] **Step 4: Typecheck**
 
@@ -1691,35 +1718,47 @@ Find the handler (there's only one). Read it end-to-end and note:
 
 - [ ] **Step 2: Add variant filtering**
 
-After Task 6's refactor, a single `generateUserRecommendations` call returns BOTH `standard` and `nonstandard` recs (as `Recommendation[]` with a `variant` field). You can get both variants for free now.
+**Important: the existing handler is registered as `api.post("/admin/compare-recs", ...)`, not `api.get(...)`** (confirmed by grepping `src/api/routes.ts`). This is deliberate — it mutates D1 when called without `dryRun=true`. Do NOT add a new `api.get(...)` handler or convert the existing one to GET. Extend the existing POST handler in place.
 
-Leave the existing namespace comparison behavior alone (it's still valuable for `likes_doc` experiments). Add a new code path triggered by `?variants=standard,nonstandard`:
+After Task 6's refactor, a single `generateUserRecommendations` call returns BOTH `standard` and `nonstandard` recs in a single `Recommendation[]` with a `.variant` discriminator on each element. You can get both variants for free now.
+
+Leave the existing namespace comparison behavior alone (it's still valuable for `likes_doc` experiments). Add a new branch to the existing POST handler, triggered by `?variants=standard,nonstandard` in the query string:
 
 ```typescript
-api.get("/admin/compare-recs", async (c) => {
+api.post("/admin/compare-recs", async (c) => {
   const did = c.req.query("did");
   if (!did) return c.json({ error: "did query param required" }, 400);
 
   const variantsParam = c.req.query("variants");
-  const namespacesParam = c.req.query("namespaces");
 
-  // New path: variant comparison
+  // New branch: variant comparison (disjoint from the existing namespace path)
   if (variantsParam) {
-    const requestedVariants = variantsParam.split(",").map((v) => v.trim());
-    const lambda = parseFloat(c.env.MMR_LAMBDA ?? "0.6");
-    const validLambda =
-      Number.isFinite(lambda) && lambda >= 0 && lambda <= 1 ? lambda : 0.6;
+    const requestedVariants = variantsParam
+      .split(",")
+      .map((v) => v.trim())
+      .filter((v): v is "standard" | "nonstandard" =>
+        v === "standard" || v === "nonstandard",
+      );
 
-    // One call produces both variants (standard + nonstandard); filter to
-    // whatever the caller asked for.
+    const rawLambda = parseFloat(c.env.MMR_LAMBDA ?? "0.6");
+    const lambda =
+      Number.isFinite(rawLambda) && rawLambda >= 0 && rawLambda <= 1
+        ? rawLambda
+        : 0.6;
+
+    // One call produces BOTH variants in a single Recommendation[] with a
+    // .variant field on each element (see Task 6's refactor of
+    // generateUserRecommendations). Filter to whatever the caller asked for.
+    const likesNamespace =
+      c.env.LIKE_QUERY_NAMESPACE === "likes_doc" ? "likes_doc" : "likes";
     const allRecs = await generateUserRecommendations(
       c.env.DB,
       c.env.VECTORS,
       did,
       parseInt(c.env.TOP_N ?? "10", 10),
-      parseLikesNamespace(c.env.LIKE_QUERY_NAMESPACE),
-      true,          // dryRun — don't touch D1
-      validLambda,
+      likesNamespace,
+      true, // dryRun — don't touch D1
+      lambda,
     );
 
     const byVariant: Record<string, typeof allRecs> = {};
@@ -1727,22 +1766,34 @@ api.get("/admin/compare-recs", async (c) => {
       byVariant[v] = allRecs.filter((r) => r.variant === v);
     }
 
-    // Enrich with document metadata (same pattern as the existing namespace
-    // comparison path — look at the handler above for the enrichment helper).
-    // Reuse whatever enrichRecs() / inline join logic is already there.
-    return c.json({ did, variants: byVariant });
+    // Reuse the existing enrichment — the existing handler already has the
+    // SELECT that joins document_uri → documents + publications to produce
+    // { title, description, url, site } per rec. Find that logic inside the
+    // existing handler (probably an inline SELECT after the generateUser
+    // calls) and either extract it to a local function or duplicate it here.
+    // Apply enrichment to each variant's rec list before returning.
+    //
+    // Example shape (once enriched):
+    //   { did, lambda, variants: { standard: [EnrichedRec, ...], nonstandard: [EnrichedRec, ...] } }
+
+    return c.json({ did, lambda, variants: byVariant /* after enrichment */ });
   }
 
-  // Existing path: namespace comparison (unchanged)
-  // ... existing code for ?namespaces=query,document ...
+  // Existing branch: namespace comparison (unchanged)
+  // ... existing code for the LIKES_NAMESPACE_QUERY / LIKES_NAMESPACE_DOC comparison ...
 });
 ```
 
-**Note:** `parseLikesNamespace` must be imported in `routes.ts` from `../workflow.js` (or wherever it lives). If it's not exported there, inline the logic: `const ns = c.env.LIKE_QUERY_NAMESPACE === "likes_doc" ? "likes_doc" : "likes";`.
+**`parseLikesNamespace` is imported from `../workflow.js`.** Confirmed in Chunk 1 (Task 7 did not import it — only `Variant` and `variantFromHost`). If you need it here, either inline the one-line string check as shown in the code block above (`c.env.LIKE_QUERY_NAMESPACE === "likes_doc" ? "likes_doc" : "likes"`) OR add it to the imports at the top of `routes.ts`. Inlining is simpler for a single call site.
 
-**Note 2:** the existing enrichment logic (which joins rec URIs against the `documents` + `publications` tables to produce `{ title, description, url, site }` per rec) should be reused for the new path. If the existing handler has a helper function like `enrichRecs`, call it on each filtered variant list. If the enrichment is inline in the existing handler, extract it to a local helper first, then call it from both paths.
+**The existing enrichment logic.** Read the existing POST handler's body before editing — locate the block that transforms each `Recommendation` into an enriched object (with `title`, `description`, `url`, `site` pulled from D1 via JOIN on `documents` + `publications`). It's probably a single `db.prepare(...).all()` after the `generateUserRecommendations` calls, followed by a `map()` that zips rec and document rows. Either:
 
-The exact refactor depends on the existing handler's structure. Do the minimal refactor needed to share the enrichment between the old and new paths.
+1. **Extract to a local helper** inside the handler scope: `async function enrich(recs: Recommendation[]): Promise<EnrichedRec[]> { ... }`. Then call `enrich(byVariant[v])` for each variant.
+2. **Duplicate inline** under the new variant path if extraction feels heavier than the win.
+
+Pick whichever produces the smaller diff. Both work.
+
+**Verify `generateUserRecommendations`'s return shape before writing this code.** Task 6 in Chunk 1 changed the function to return `Recommendation[]` with a `.variant` discriminator. Read `src/recommend/index.ts` to confirm that shape is actually what's returned — if Chunk 1 deviated from the plan (unlikely but possible), adapt accordingly.
 
 - [ ] **Step 3: Typecheck**
 
@@ -1851,7 +1902,19 @@ Expected files changed:
 git diff wrangler.toml
 ```
 
-Should show the user's pre-session local edits (`TOP_N = "12"`, `WORKER_URL` change, etc.) still unstaged. If this is empty, the local edits got committed somewhere — investigate before deploying.
+Expected output: a non-empty diff showing **exactly** the pre-session local edits the user had before this plan started — specifically:
+
+- `TOP_N = "10"` → `TOP_N = "12"` (or similar user customization)
+- `WORKER_URL = "https://standard-recs.bryan-78d.workers.dev"` → `WORKER_URL = "https://standardrecs.site"`
+- (Possibly no change if Task 3's stash/pop merged everything into the committed state already — that's also fine as long as the user's values are now what's committed)
+
+You should NOT see any diff for `MMR_LAMBDA`, `LIKE_EMBED_MODE`, `LIKE_QUERY_NAMESPACE`, or the `[[routes]]` blocks — those all got committed in Task 3 and are now part of the branch. If any of those appear as unstaged diffs, something went wrong with Task 3's stash dance and you should stop and investigate before deploying.
+
+```bash
+git status --short
+```
+
+Expected: exactly `M wrangler.toml` (one modified file) plus any pre-existing untracked files from before the session (`docs/stitch/`, old plan docs under `docs/superpowers/plans/`). No new modified files — everything else should be committed.
 
 ---
 
@@ -1883,15 +1946,21 @@ Expected: wrangler uploads the Worker, prints the new worker URL, confirms the t
 curl -X POST https://standardrecs.site/admin/sync
 ```
 
-Watch for a success response. The sync workflow is durable — it runs asynchronously and will take some minutes to complete. You can monitor progress via:
+Watch for a success response. The sync workflow is durable — it runs asynchronously and takes several minutes to complete. Two concrete ways to monitor it:
+
+**Option A: `wrangler tail` (simpler, just tail live logs)**
 
 ```bash
-# Cloudflare Workflows API — list instances, find the most recent, check status
-wrangler workflows list standard-recs-sync  # if wrangler supports this
-# Or use gh/curl against the Workflows API directly (see prior debugging sessions)
+npx wrangler tail standard-recs
 ```
 
-Don't proceed to Step 4 until the sync finishes (look for a recent instance with `status: "complete"`).
+Wait for the log line `Recommendations: N total` (or similar — see the existing `runFullPipeline` log output in `src/workflow.ts`) before proceeding. That's the last step of the pipeline. Also look for `Embedded N likes (query=N, doc=0), …` confirming the embed step ran.
+
+**Option B: Cloudflare dashboard**
+
+Open https://dash.cloudflare.com → Workers & Pages → `standard-recs` → Workflows tab → `standard-recs-sync` → Instances. The most recent instance should show `status: running` initially and transition to `complete`. Click into it to see per-step progress including `discover` (which was recently batched — should be fast), the document sync batches, and the `embed` / `recommend` tail.
+
+**Do not proceed to Step 4 until the sync reports complete.** If it errors on `discover` or embeds, stop and investigate via the logs — the variant system can't show nonstandard recs until at least one cron has populated the `variant = 'nonstandard'` rows.
 
 - [ ] **Step 4: Smoke test the three landing pages**
 
@@ -1938,14 +2007,24 @@ Expected: JSON with `variants: { standard: [...], nonstandard: [...] }`, each co
 
 Eyeball the two lists. The `standard` list should match what `standardrecs.site/recs/<your-did>` rendered. The `nonstandard` list should be the MMR picks — same 12-element length but different documents, hopefully feeling "adjacent" rather than identical.
 
-**If nonstandard feels too similar to standard:** λ=0.6 might be too high for your taste/corpus. Try:
+**If nonstandard feels too similar to standard:** λ=0.6 might be too high for your taste/corpus. The tuning loop is:
 
 ```bash
-# Locally override MMR_LAMBDA via wrangler vars, then re-trigger sync
-# (or just update wrangler.toml and redeploy for tuning iterations)
+# 1. Edit wrangler.toml:
+#      MMR_LAMBDA = "0.5"      # or 0.4, 0.55, 0.65, 0.7 — try a few
+# 2. Redeploy (only affects new sync runs):
+#      npm run deploy
+# 3. The compare-recs endpoint uses MMR_LAMBDA directly and doesn't
+#    require a re-sync — you can immediately hit it and see the new
+#    nonstandard list at the new lambda:
+curl -sX POST "https://standardrecs.site/admin/compare-recs?did=<your-did>&variants=standard,nonstandard" | jq .
 ```
 
-This is the λ-tuning loop. Pick a λ that feels right based on eyeballing.
+(Note the `-X POST` — `/admin/compare-recs` is a POST endpoint. The `?variants=` parameter lives on the query string even for POST.)
+
+Iterate λ until the nonstandard list feels like the right balance of "close to taste" and "genuinely different from standard." Typical sweet spot is 0.5-0.7. Values below 0.4 start surfacing genuinely weird picks; values above 0.8 collapse back onto the standard top-12.
+
+Once you've picked a λ, update `wrangler.toml` + redeploy one last time. The next daily cron will persist rec rows at the new λ; users will see the change on their next `/recs/:did` visit.
 
 - [ ] **Step 7: Open the PR**
 
