@@ -263,22 +263,24 @@ api.post("/admin/compare-recs", async (c) => {
 
   const topN = parseInt(c.env.TOP_N ?? "10", 10) || 10;
 
-  const queryRecs = await generateUserRecommendations(
-    c.env.DB,
-    c.env.VECTORS,
-    did,
-    topN,
-    LIKES_NAMESPACE_QUERY,
-    true, // dryRun
-  );
-  const docRecs = await generateUserRecommendations(
-    c.env.DB,
-    c.env.VECTORS,
-    did,
-    topN,
-    LIKES_NAMESPACE_DOC,
-    true, // dryRun
-  );
+  const [queryRecs, docRecs] = await Promise.all([
+    generateUserRecommendations(
+      c.env.DB,
+      c.env.VECTORS,
+      did,
+      topN,
+      LIKES_NAMESPACE_QUERY,
+      true, // dryRun
+    ),
+    generateUserRecommendations(
+      c.env.DB,
+      c.env.VECTORS,
+      did,
+      topN,
+      LIKES_NAMESPACE_DOC,
+      true, // dryRun
+    ),
+  ]);
 
   // Enrich each rec with the document metadata so the comparison is readable.
   const allUris = Array.from(
