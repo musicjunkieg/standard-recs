@@ -94,7 +94,7 @@ openssl rand -hex 32 | tee admin-token.txt        # save a copy somewhere safe
 wrangler secret put ADMIN_TOKEN                   # paste the value when prompted
 ```
 
-If the secret is missing at runtime, `bearerAuth({ token: undefined })` will throw synchronously during construction, which bubbles up as a 500 — the admin route fails closed. Public routes remain unaffected. This is the correct failure mode: better to 500 on admin than to silently accept all requests.
+If the secret is missing at runtime, `bearerAuth({ token: undefined })` does **not** throw during construction — the guard inside `bearerAuth` is `if (!("token" in options || "verifyToken" in options))`, and since `{ token: undefined }` has the key present, construction succeeds. At request time, `typeof options.token === "string"` is false and `Array.isArray(undefined)` is false, so `equal` stays `false` and every request is rejected with `401 Unauthorized`. The middleware still fails closed — admin routes are unreachable — but the observable signal is a 401, not a 500. Public routes remain unaffected. When testing pre-deploy, a 401 on `/admin/sync` is ambiguous: it could mean "secret is set and the token I sent is wrong" or "secret is unset entirely." The operator verification steps below must therefore always assert both the missing-header and correct-token cases.
 
 ### Post-deploy
 
