@@ -15,11 +15,14 @@ CREATE TABLE IF NOT EXISTS likes (
   liked_post_text TEXT,
   liked_at TEXT,
   indexed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  embedded_at TEXT,
   FOREIGN KEY (did) REFERENCES users(did)
 );
 
 CREATE INDEX IF NOT EXISTS idx_likes_did ON likes(did);
 CREATE INDEX IF NOT EXISTS idx_likes_liked_at ON likes(liked_at);
+CREATE INDEX IF NOT EXISTS idx_likes_unembedded
+  ON likes(liked_at DESC) WHERE embedded_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS documents (
   uri TEXT PRIMARY KEY,
@@ -31,10 +34,13 @@ CREATE TABLE IF NOT EXISTS documents (
   text_content TEXT,
   tags TEXT,
   published_at TEXT,
-  indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
+  indexed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  embedded_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_documents_published ON documents(published_at);
+CREATE INDEX IF NOT EXISTS idx_documents_unembedded
+  ON documents(indexed_at) WHERE embedded_at IS NULL;
 
 -- `variant` and `rank` were added in successive 2026-04-13 migrations;
 -- see the "Migration history" comment at the bottom of this file for
@@ -112,6 +118,14 @@ CREATE TABLE IF NOT EXISTS oauth_sessions (
 --
 --   2026-04-13 round 3 (preserve MMR pick order at read time):
 --     ALTER TABLE recommendations ADD COLUMN rank INTEGER NOT NULL DEFAULT 0;
+--
+--   2026-04-13 round 4 (embed scaling fix — Bug 1):
+--     ALTER TABLE likes ADD COLUMN embedded_at TEXT;
+--     ALTER TABLE documents ADD COLUMN embedded_at TEXT;
+--     CREATE INDEX IF NOT EXISTS idx_likes_unembedded
+--       ON likes(liked_at DESC) WHERE embedded_at IS NULL;
+--     CREATE INDEX IF NOT EXISTS idx_documents_unembedded
+--       ON documents(indexed_at) WHERE embedded_at IS NULL;
 --
 -- If you're bootstrapping a new database, you DO NOT need to run the
 -- ALTER statements — the CREATE TABLE above already has the
