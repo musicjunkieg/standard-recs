@@ -138,7 +138,10 @@ export class JetstreamListener extends DurableObject<Env> {
       if (collection === PUBLICATION_COLLECTION) {
         await this.registerPublisher(did);
       } else if (collection === DOCUMENT_COLLECTION) {
-        await this.indexDocumentIfKnown(did, msg);
+        const rkey = msg.commit?.rkey as string | undefined;
+        const record = msg.commit?.record as unknown;
+        if (!rkey) return;
+        await this.indexDocumentIfKnown(did, rkey, record);
       }
     } catch {
       // Skip malformed messages
@@ -163,14 +166,11 @@ export class JetstreamListener extends DurableObject<Env> {
 
   private async indexDocumentIfKnown(
     did: string,
-    msg: { commit?: { rkey?: string; record?: unknown } },
+    rkey: string,
+    record: unknown,
   ): Promise<void> {
-    const rkey = msg.commit?.rkey;
-    const rawRecord = msg.commit?.record;
-    if (!rkey) return;
-
-    const record = validateStandardDocument(rawRecord);
-    if (!record) {
+    const validated = validateStandardDocument(record);
+    if (!validated) {
       console.warn(`Jetstream: invalid document record from ${did}/${rkey}`);
       return;
     }
@@ -186,7 +186,7 @@ export class JetstreamListener extends DurableObject<Env> {
 
     const uri = `at://${did}/${DOCUMENT_COLLECTION}/${rkey}`;
     try {
-      await upsertDocumentStmt(this.env.DB, uri, did, record).run();
+      await upsertDocumentStmt(this.env.DB, uri, did, validated).run();
       this.documentsIndexed++;
     } catch {
       // D1 write failed — non-fatal
