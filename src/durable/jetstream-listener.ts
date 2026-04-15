@@ -242,9 +242,14 @@ export class JetstreamListener extends DurableObject<Env> {
 
     // D1 second: batch two statements so recommendations are
     // cleaned up before the documents row (preventing a window
-    // where a rec row points at a just-deleted doc row).
+    // where a rec row points at a just-deleted doc row). Inspect
+    // the per-statement changes count so `documentsDeleted` only
+    // increments when a documents row was actually removed — a
+    // delete event for a doc we never indexed is a no-op batch
+    // that succeeds with zero rows affected, and counting it
+    // would inflate the metric and mislead operators.
     try {
-      await this.env.DB.batch([
+      const results = await this.env.DB.batch([
         this.env.DB
           .prepare(`DELETE FROM recommendations WHERE document_uri = ?`)
           .bind(uri),
@@ -252,7 +257,9 @@ export class JetstreamListener extends DurableObject<Env> {
           .prepare(`DELETE FROM documents WHERE uri = ?`)
           .bind(uri),
       ]);
-      this.documentsDeleted++;
+      if ((results[1]?.meta?.changes ?? 0) > 0) {
+        this.documentsDeleted++;
+      }
     } catch (err) {
       console.warn(`Jetstream: D1 delete failed for ${uri}:`, err);
     }

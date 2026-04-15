@@ -321,6 +321,14 @@ export async function syncDocumentsFromRepo(
   let fetched = 0;
   let stored = 0;
   let errors = 0;
+  // Distinguishes per-record validation errors (which just bump
+  // `errors` and let the walk continue) from D1 batch persistence
+  // failures (which mean a whole page of records didn't land in D1).
+  // On persistence failure we must refuse to stamp the new rev —
+  // otherwise the next cron would see a rev match, skip the walk,
+  // and the dropped records would stay lost until the publisher
+  // commits again (bumping the rev and forcing a retry).
+  let persistenceFailed = false;
 
   while (true) {
     let body: Awaited<ReturnType<typeof listRecordsFromPds<StandardDocument>>>;
@@ -365,6 +373,7 @@ export async function syncDocumentsFromRepo(
         stored += stmts.length;
       } catch (err) {
         errors += stmts.length;
+        persistenceFailed = true;
         console.error(`Batch insert failed for ${did}:`, err);
       }
     }
@@ -379,7 +388,12 @@ export async function syncDocumentsFromRepo(
     stored,
     errors,
     bridged: false,
-    newRev: currentRev,
+    // If any page's db.batch(stmts) threw, we have an incomplete
+    // corpus for this publisher. Stamping the rev now would let
+    // the next cron's rev-match skip the walk and leave the
+    // dropped records permanently unseen. Return newRev=null so
+    // the caller does NOT stamp; the next cron will retry in full.
+    newRev: persistenceFailed ? null : currentRev,
     skipped: false,
   };
 }
