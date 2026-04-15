@@ -3,7 +3,7 @@
  * Publisher discovery is handled by discover.ts.
  */
 
-import { listRecordsFromPds } from "./pds-fetch.js";
+import { listRecordsFromPds, getLatestCommitRev } from "./pds-fetch.js";
 import { resolvePdsCached, isBridgedPds } from "./pds-resolver.js";
 
 const DOCUMENT_COLLECTION = "site.standard.document";
@@ -20,6 +20,7 @@ export type DocSyncResult = {
   fetched: number;
   stored: number;
   errors: number;
+  skipped: number;
 };
 
 /**
@@ -44,12 +45,14 @@ export async function syncDocumentsBatch(
   stored: number;
   errors: number;
   bridged: number;
+  skipped: number;
 }> {
   let processed = 0;
   let fetched = 0;
   let stored = 0;
   let errors = 0;
   let bridged = 0;
+  let skipped = 0;
 
   // Claim one publisher at a time via UPDATE ... RETURNING. The subquery
   // inside the UPDATE sees the state after any concurrent UPDATE commits,
@@ -78,14 +81,14 @@ export async function syncDocumentsBatch(
     // skip to the next candidate.
     const candidate = await db
       .prepare(
-        `SELECT did, label FROM publishers
+        `SELECT did, label, last_synced_rev FROM publishers
           WHERE (last_synced_at IS NULL
                  OR last_synced_at < datetime('now', '-23 hours'))
             AND COALESCE(label, '') != 'bridged'
           ORDER BY last_synced_at ASC NULLS FIRST
           LIMIT 1`,
       )
-      .first<{ did: string; label: string | null }>();
+      .first<{ did: string; label: string | null; last_synced_rev: string | null }>();
 
     if (!candidate) break; // nothing left to sync
 
@@ -109,11 +112,29 @@ export async function syncDocumentsBatch(
     processed++;
 
     try {
-      const result = await syncDocumentsFromRepo(db, vectors, claimed.did);
+      const result = await syncDocumentsFromRepo(
+        db,
+        vectors,
+        claimed.did,
+        claimed.last_synced_rev,
+      );
       fetched += result.fetched;
       stored += result.stored;
       errors += result.errors;
       if (result.bridged) bridged++;
+      if (result.skipped) skipped++;
+      if (result.newRev !== null) {
+        // Stamp the rev AFTER successful processing. If sync crashes
+        // mid-publisher, last_synced_rev stays at the old value and
+        // the next attempt will treat it as a mismatch → full resync.
+        // Ordering relative to the last_synced_at stamp (which happens
+        // pre-processing for CAS race protection) is intentional: see
+        // the spec's "Control flow inside syncDocumentsBatch" section.
+        await db
+          .prepare(`UPDATE publishers SET last_synced_rev = ? WHERE did = ?`)
+          .bind(result.newRev, claimed.did)
+          .run();
+      }
       if (result.stored > 0) {
         console.log(`    ${claimed.label ?? claimed.did}: ${result.stored} docs`);
       }
@@ -124,10 +145,10 @@ export async function syncDocumentsBatch(
   }
 
   if (processed === 0) {
-    return { processed: 0, fetched: 0, stored: 0, errors: 0, bridged: 0 };
+    return { processed: 0, fetched: 0, stored: 0, errors: 0, bridged: 0, skipped: 0 };
   }
 
-  return { processed, fetched, stored, errors, bridged };
+  return { processed, fetched, stored, errors, bridged, skipped };
 }
 
 /**
@@ -211,11 +232,19 @@ export async function syncDocumentsFromRepo(
   db: D1Database,
   vectors: VectorizeIndex,
   did: string,
-): Promise<{ fetched: number; stored: number; errors: number; bridged: boolean }> {
+  lastSyncedRev: string | null,
+): Promise<{
+  fetched: number;
+  stored: number;
+  errors: number;
+  bridged: boolean;
+  newRev: string | null;
+  skipped: boolean;
+}> {
   const pds = await resolvePdsCached(db, did);
   if (!pds) {
     console.error(`  syncDocumentsFromRepo: cannot resolve PDS for ${did}`);
-    return { fetched: 0, stored: 0, errors: 1, bridged: false };
+    return { fetched: 0, stored: 0, errors: 1, bridged: false, newRev: null, skipped: false };
   }
 
   // Bridged PDSes (e.g., brid.gy) create site.standard.publication records
@@ -225,9 +254,44 @@ export async function syncDocumentsFromRepo(
   if (isBridgedPds(pds)) {
     const marked = await markBridgedPublisher(db, vectors, did);
     if (!marked) {
-      return { fetched: 0, stored: 0, errors: 1, bridged: false };
+      return { fetched: 0, stored: 0, errors: 1, bridged: false, newRev: null, skipped: false };
     }
-    return { fetched: 0, stored: 0, errors: 0, bridged: true };
+    return { fetched: 0, stored: 0, errors: 0, bridged: true, newRev: null, skipped: false };
+  }
+
+  // Rev probe: cheap check for whether anything in the repo has
+  // changed since last cron. Match → skip the full listRecords
+  // walk. Mismatch or probe failure → fall through to the current
+  // sync path. `rev` is repo-wide so a chatty Bluesky publisher
+  // bumps it on every unrelated commit — the degraded case is
+  // strictly no worse than today (one cheap HTTP call overhead).
+  // See docs/superpowers/specs/2026-04-14-doc-sync-rev-check-design.md
+  // for the full tradeoff analysis.
+  let currentRev: string | null = null;
+  try {
+    currentRev = await getLatestCommitRev(pds, did);
+  } catch (err) {
+    console.warn(`  getLatestCommitRev threw for ${did}:`, err);
+    currentRev = null;
+  }
+
+  if (
+    currentRev !== null &&
+    lastSyncedRev !== null &&
+    currentRev === lastSyncedRev
+  ) {
+    // Repo unchanged — skip the full walk. Returning newRev =
+    // currentRev causes the caller to re-stamp the same value,
+    // which is a no-op write but keeps last_synced_rev consistent
+    // with the latest confirmed observation.
+    return {
+      fetched: 0,
+      stored: 0,
+      errors: 0,
+      bridged: false,
+      newRev: currentRev,
+      skipped: true,
+    };
   }
 
   // Sync publication records first so we have URLs for document links.
@@ -257,6 +321,14 @@ export async function syncDocumentsFromRepo(
   let fetched = 0;
   let stored = 0;
   let errors = 0;
+  // Distinguishes per-record validation errors (which just bump
+  // `errors` and let the walk continue) from D1 batch persistence
+  // failures (which mean a whole page of records didn't land in D1).
+  // On persistence failure we must refuse to stamp the new rev —
+  // otherwise the next cron would see a rev match, skip the walk,
+  // and the dropped records would stay lost until the publisher
+  // commits again (bumping the rev and forcing a retry).
+  let persistenceFailed = false;
 
   while (true) {
     let body: Awaited<ReturnType<typeof listRecordsFromPds<StandardDocument>>>;
@@ -271,12 +343,12 @@ export async function syncDocumentsFromRepo(
     } catch (err) {
       // Network/JSON error — record and return partial progress.
       console.error(`  listRecordsFromPds threw for ${did}:`, err);
-      return { fetched, stored, errors: errors + 1, bridged: false };
+      return { fetched, stored, errors: errors + 1, bridged: false, newRev: null, skipped: false };
     }
 
     if (body === null) {
       // PDS returned a non-2xx — surface as an error, keep partial totals
-      return { fetched, stored, errors: errors + 1, bridged: false };
+      return { fetched, stored, errors: errors + 1, bridged: false, newRev: null, skipped: false };
     }
 
     const { records, cursor: nextCursor } = body;
@@ -301,6 +373,7 @@ export async function syncDocumentsFromRepo(
         stored += stmts.length;
       } catch (err) {
         errors += stmts.length;
+        persistenceFailed = true;
         console.error(`Batch insert failed for ${did}:`, err);
       }
     }
@@ -310,7 +383,19 @@ export async function syncDocumentsFromRepo(
     await sleep(250);
   }
 
-  return { fetched, stored, errors, bridged: false };
+  return {
+    fetched,
+    stored,
+    errors,
+    bridged: false,
+    // If any page's db.batch(stmts) threw, we have an incomplete
+    // corpus for this publisher. Stamping the rev now would let
+    // the next cron's rev-match skip the walk and leave the
+    // dropped records permanently unseen. Return newRev=null so
+    // the caller does NOT stamp; the next cron will retry in full.
+    newRev: persistenceFailed ? null : currentRev,
+    skipped: false,
+  };
 }
 
 export type StandardDocument = {

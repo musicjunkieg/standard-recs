@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS publishers (
   label TEXT,
   added_at TEXT NOT NULL DEFAULT (datetime('now')),
   last_synced_at TEXT,
-  pds_url TEXT
+  pds_url TEXT,
+  last_synced_rev TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_publishers_last_synced
@@ -126,6 +127,9 @@ CREATE TABLE IF NOT EXISTS oauth_sessions (
 --       ON likes(liked_at DESC) WHERE embedded_at IS NULL;
 --     CREATE INDEX IF NOT EXISTS idx_documents_unembedded
 --       ON documents(indexed_at) WHERE embedded_at IS NULL;
+--
+--   2026-04-14 (doc sync rev check — Bug 2):
+--     ALTER TABLE publishers ADD COLUMN last_synced_rev TEXT;
 --
 -- If you're bootstrapping a new database, you DO NOT need to run the
 -- ALTER statements — the CREATE TABLE above already has the
