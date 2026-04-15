@@ -150,6 +150,8 @@ export async function getLatestCommitRev(
 
 Returns the `rev` field from `com.atproto.sync.getLatestCommit` on success, `null` on any non-2xx HTTP response or malformed JSON. Matches the existing `listRecordsFromPds` contract: errors return `null`, network/parse exceptions propagate.
 
+**Implementation detail:** use `friendlyFetch` from `src/sync/fetch-helper.ts`, not bare `fetch`. `listRecordsFromPds` already uses `friendlyFetch` for its timeout / error-handling semantics; `getLatestCommitRev` must match. The URL shape is `${pds}/xrpc/com.atproto.sync.getLatestCommit?did=${did}`.
+
 ### Modified signature: `syncDocumentsFromRepo` in `src/sync/documents.ts`
 
 ```ts
@@ -309,3 +311,4 @@ No changes to `wrangler.toml`. No new env vars. No new secrets. No dependency ch
 - **Not** changing `syncDocumentsBatch`'s claim/CAS pattern. Load-bearing and unrelated.
 - **Not** rotating or auditing `last_synced_at` semantics. It remains a 23h cooldown, stamped pre-processing.
 - **Not** implementing a retention policy on the new `documentsUpdated` / `documentsDeleted` / `documentsRejected` counters. They're unbounded in-memory counters on the DO, same as the existing `publishersFound` and `documentsIndexed`. Reset on DO restart. If long-term observability becomes a concern, that's a separate PR that probably wants to write to a real metrics backend rather than DO state.
+- **Not** fixing the pre-existing `markBridgedPublisher` vector-ID mismatch (`src/sync/documents.ts:161`). That function calls `vectors.deleteByIds(ids)` where `ids = docs.map((d) => d.uri)` — raw AT URIs. But documents are stored in Vectorize under SHA-256-hashed IDs per `src/recommend/vector-id.ts:26`, so those delete calls are effectively no-ops and bridged publishers leave orphan vectors behind. The new `deleteDocument` path on the Jetstream DO in this PR correctly uses `vectorIds([uri])`, which is internally consistent; but an implementer working in `documents.ts` may notice the mismatch in `markBridgedPublisher` and be tempted to "helpfully fix" it in-line. **Do not.** It's a separate bug with its own implications (what happens to orphan vectors from already-marked bridged publishers? Is a backfill cleanup needed?) and deserves its own spec and PR. Leave it alone for now; I'll track it as follow-up work after this PR ships.
