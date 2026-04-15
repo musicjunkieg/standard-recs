@@ -28,6 +28,20 @@ export class JetstreamListener extends DurableObject<Env> {
   private documentsRejected = 0;
   private connected = false;
   private lastEventAt: string | null = null;
+  /**
+   * Serializes handleMessage calls so commit order is preserved.
+   * WebSocket message events fire synchronously as they arrive,
+   * but handleMessage is async — without explicit chaining, two
+   * messages touching the same document (e.g., create → update,
+   * or create → delete) could interleave their awaits and race
+   * at D1, leaving the table in whichever order the writes
+   * happened to land rather than the order the publisher
+   * committed them. Chaining each new handler onto this promise
+   * guarantees each message fully completes before the next
+   * starts. Errors are logged and swallowed so a single bad
+   * payload doesn't break the chain for subsequent messages.
+   */
+  private messageQueue: Promise<void> = Promise.resolve();
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -98,7 +112,14 @@ export class JetstreamListener extends DurableObject<Env> {
       });
 
       ws.addEventListener("message", (event) => {
-        this.handleMessage(event.data);
+        // See messageQueue's JSDoc above for why this chains
+        // through a promise rather than invoking handleMessage
+        // directly.
+        this.messageQueue = this.messageQueue
+          .then(() => this.handleMessage(event.data))
+          .catch((err) => {
+            console.error("JetstreamListener: handleMessage threw:", err);
+          });
       });
 
       ws.addEventListener("close", () => {

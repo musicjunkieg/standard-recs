@@ -78,14 +78,16 @@ New private method `deleteDocument(did: string, rkey: string)` on the Jetstream 
 
 1. Construct the URI: `at://${did}/site.standard.document/${rkey}`.
 2. Compute the vector ID via the existing `vectorIds([uri])` helper from `src/recommend/vector-id.ts`. This is the same mapping the cron path uses, so there's no risk of drift.
-3. Delete the vector first via `env.VECTORS.deleteByIds([vectorId])`. Wrap in try/catch; on failure, log at warn level and continue.
-4. Delete the D1 rows via `db.batch` of two statements, in order:
+3. Attempt `env.VECTORS.deleteByIds([vectorId])` first inside a try/catch. On failure, log at warn level and continue — the D1 side still runs regardless. A failed vector delete produces an orphan vector that a future cleanup job can recover by diffing Vectorize IDs against `documents.uri`.
+4. Run a `db.batch` of two DELETEs, in order:
    ```sql
    DELETE FROM recommendations WHERE document_uri = ?
    DELETE FROM documents WHERE uri = ?
    ```
-   `recommendations` first so a partial failure at the `documents` step doesn't leave dangling rec rows pointing at a still-present doc. Wrap the batch in try/catch; on failure, log and continue.
-5. On successful full deletion, increment a new `documentsDeleted` counter on the DO.
+   `recommendations` first so a partial failure at the `documents` step doesn't leave dangling rec rows pointing at a still-present doc. Wrap the batch in try/catch; on failure, log at warn level and continue.
+5. Increment `documentsDeleted` **only when the second batch statement actually removed a row** — i.e., when `results[1].meta.changes > 0`. D1 batch returns a `D1Result[]` where each entry's `meta.changes` is the rows-affected count for that statement. A delete event for a document we never indexed succeeds as a no-op batch with `changes: 0`; counting those would inflate the metric and mislead operators. The other DO counters (`documentsIndexed`, `documentsUpdated`, `documentsRejected`, `publishersFound`) all follow the same "only on real effects" pattern.
+
+**Counter semantics caveat.** `documentsDeleted` reflects **successful D1 document-row removals**, not "both sides fully deleted." Because the vector delete runs first in its own try/catch, it's possible for the vector delete to fail (orphan vector lingers) while the D1 delete succeeds and `documentsDeleted` increments. `/admin/jetstream/status` therefore does **not** guarantee both sides were deleted — it guarantees the D1 row is gone. Operators relying on the counter for audit purposes should pair it with a periodic orphan-vector sweep (future work).
 
 **Why delete the vector first, then D1?** If the vector delete fails, we have an orphan vector living in Vectorize — recoverable via a future cleanup job that diffs Vectorize IDs against `documents.uri`. If the D1 delete fails, we have an orphan D1 row that we'll re-see on the next cron and could retry against. Orphan vectors are cheaper to clean up than orphan D1 rows because Vectorize has cheap bulk-delete. The ordering picks the cheaper recovery path.
 
