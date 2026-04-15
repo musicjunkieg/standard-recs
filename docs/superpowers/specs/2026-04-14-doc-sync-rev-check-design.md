@@ -233,9 +233,11 @@ This is the primary signal for whether the rev check is working. On an establish
 
 Three new counters on the DO state, surfaced via `/admin/jetstream/status`:
 
-- `documentsUpdated` — increments on successful handling of an `update` event for `site.standard.document`
-- `documentsDeleted` — increments on successful full deletion (both vector and D1)
+- `documentsUpdated` — increments when `indexDocumentIfKnown` returns `true` for an `update` event (i.e., validation passed, publisher was known + non-bridged, and the `upsertDocumentStmt` D1 write succeeded). Does NOT fire on validation rejection or on unknown-publisher skips.
+- `documentsDeleted` — increments when the `DELETE FROM documents` statement in the Jetstream DO's `deleteDocument` batch actually removed a row, i.e., when `results[1].meta.changes > 0`. **Vector deletion is best-effort and is NOT required for this counter to increment.** The counter reflects successful D1 document-row removals only; see the "Counter semantics caveat" paragraph in "The delete path, in detail" above for the full implication on `/admin/jetstream/status`.
 - `documentsRejected` — increments when `validateStandardDocument` returns null on a `create` or `update` event. (This counter replaces the existing silent drop with an observable one. It's tiny additional scope and buys us visibility into how often publishers push malformed records.)
+
+**`documentsIndexed` (pre-existing counter):** still means "successful create-event index writes." Increments in `handleDocumentOp`'s `create` branch after a successful `indexDocumentIfKnown` return. Does NOT double-count updates (which bump `documentsUpdated` instead). This symmetry is enforced by keeping the counter bumps at the dispatch site in `handleDocumentOp` rather than inside the shared `indexDocumentIfKnown` helper.
 
 ## Verification plan
 

@@ -219,8 +219,15 @@ export class JetstreamListener extends DurableObject<Env> {
     rkey: string,
     record: unknown,
   ): Promise<void> {
+    // Both branches bump their own counter at the dispatch site so
+    // `indexDocumentIfKnown` itself stays counter-free. Previously the
+    // indexer bumped `documentsIndexed` internally, which double-counted
+    // update events (they'd bump documentsIndexed AND documentsUpdated).
+    // Keeping the counter logic here makes create/update semantics
+    // symmetric and easy to reason about.
     if (operation === "create") {
-      await this.indexDocumentIfKnown(did, rkey, record);
+      const wrote = await this.indexDocumentIfKnown(did, rkey, record);
+      if (wrote) this.documentsIndexed++;
       return;
     }
     if (operation === "update") {
@@ -310,7 +317,6 @@ export class JetstreamListener extends DurableObject<Env> {
     const uri = `at://${did}/${DOCUMENT_COLLECTION}/${rkey}`;
     try {
       await upsertDocumentStmt(this.env.DB, uri, did, validated).run();
-      this.documentsIndexed++;
       return true;
     } catch {
       // D1 write failed — non-fatal
