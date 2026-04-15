@@ -7,6 +7,7 @@
 
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { bearerAuth } from "hono/bearer-auth";
 import type { Env } from "../env.js";
 import { type Variant, variantFromHost } from "../variants.js";
 import { createOAuthClient, buildClientMetadata } from "../oauth/client.js";
@@ -248,6 +249,17 @@ api.get("/stats", async (c) => {
 api.get("/users", async (c) => {
   const users = await listUsers(c.env.DB);
   return c.json({ users });
+});
+
+// Admin routes require a valid bearer token. The token is a per-
+// deployment secret (wrangler secret put ADMIN_TOKEN). We construct
+// bearerAuth per request because the middleware takes `token` at
+// construction time, and secrets are only available on `c.env` inside
+// a request handler. The construction cost is microseconds and we
+// inherit Hono's timing-safe comparison this way.
+api.use("/admin/*", async (c, next) => {
+  const mw = bearerAuth({ token: c.env.ADMIN_TOKEN });
+  return mw(c, next);
 });
 
 // ─── Admin ───
@@ -591,14 +603,9 @@ api.post("/admin/add-publisher", async (c) => {
 });
 
 // Test Voyage API + Vectorize with a single embedding.
-// Gated by VOYAGE_API_KEY in the Authorization header to prevent
-// unauthenticated callers from triggering billable API calls.
+// Gated by the /admin/* bearer middleware (ADMIN_TOKEN) — do not
+// add a second inline check here.
 api.get("/admin/test-embed", async (c) => {
-  const token = c.req.header("Authorization")?.replace("Bearer ", "");
-  if (!token || token !== c.env.VOYAGE_API_KEY) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
-
   let currentStep = "voyage-fetch";
   try {
     const controller = new AbortController();
@@ -680,11 +687,6 @@ api.get("/admin/test-embed", async (c) => {
 // sends them through Voyage, upserts to Vectorize, returns full result or error.
 // POST because it writes to Vectorize (side effects).
 api.post("/admin/debug-embed", async (c) => {
-  const token = c.req.header("Authorization")?.replace("Bearer ", "");
-  if (!token || token !== c.env.VOYAGE_API_KEY) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
-
   const results: Array<{ step: string; ok: boolean; detail: unknown }> = [];
   const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
