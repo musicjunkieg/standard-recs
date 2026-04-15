@@ -12,6 +12,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env.js";
 import { upsertDocumentStmt, type StandardDocument } from "../sync/documents.js";
+import { vectorIds } from "../recommend/vector-id.js";
 
 const PUBLICATION_COLLECTION = "site.standard.publication";
 const DOCUMENT_COLLECTION = "site.standard.document";
@@ -22,6 +23,9 @@ export class JetstreamListener extends DurableObject<Env> {
   private ws: WebSocket | null = null;
   private publishersFound = 0;
   private documentsIndexed = 0;
+  private documentsUpdated = 0;
+  private documentsDeleted = 0;
+  private documentsRejected = 0;
   private connected = false;
   private lastEventAt: string | null = null;
 
@@ -36,6 +40,9 @@ export class JetstreamListener extends DurableObject<Env> {
           connected: this.connected,
           publishersFound: this.publishersFound,
           documentsIndexed: this.documentsIndexed,
+          documentsUpdated: this.documentsUpdated,
+          documentsDeleted: this.documentsDeleted,
+          documentsRejected: this.documentsRejected,
           lastEventAt: this.lastEventAt,
         });
 
@@ -48,6 +55,9 @@ export class JetstreamListener extends DurableObject<Env> {
           connected: this.connected,
           publishersFound: this.publishersFound,
           documentsIndexed: this.documentsIndexed,
+          documentsUpdated: this.documentsUpdated,
+          documentsDeleted: this.documentsDeleted,
+          documentsRejected: this.documentsRejected,
           lastEventAt: this.lastEventAt,
         });
 
@@ -131,17 +141,29 @@ export class JetstreamListener extends DurableObject<Env> {
       const did = msg.did as string;
       const collection = msg.commit?.collection as string | undefined;
       const operation = msg.commit?.operation as string | undefined;
-      if (!did || !collection || operation !== "create") return;
+      if (!did || !collection || !operation) return;
 
       this.lastEventAt = new Date().toISOString();
 
       if (collection === PUBLICATION_COLLECTION) {
-        await this.registerPublisher(did);
-      } else if (collection === DOCUMENT_COLLECTION) {
+        // Only handle publication creates. Updates and deletes on
+        // publication records are intentional no-ops: publication URL
+        // changes are picked up by the next cron's listRecords walk
+        // (INSERT OR REPLACE), and a publication delete is an
+        // ambiguous signal we don't want to act on automatically.
+        // See docs/superpowers/specs/2026-04-14-doc-sync-rev-check-design.md
+        // for the full rationale.
+        if (operation === "create") {
+          await this.registerPublisher(did);
+        }
+        return;
+      }
+
+      if (collection === DOCUMENT_COLLECTION) {
         const rkey = msg.commit?.rkey as string | undefined;
-        const record = msg.commit?.record as unknown;
         if (!rkey) return;
-        await this.indexDocumentIfKnown(did, rkey, record);
+        const record = msg.commit?.record as unknown;
+        await this.handleDocumentOp(did, operation, rkey, record);
       }
     } catch {
       // Skip malformed messages
@@ -164,15 +186,88 @@ export class JetstreamListener extends DurableObject<Env> {
     }
   }
 
+  /**
+   * Route a site.standard.document commit op to the appropriate
+   * handler. `create` and `update` share the indexer path because
+   * upsertDocumentStmt is already INSERT OR REPLACE. `delete`
+   * runs a new path that removes from D1 + Vectorize.
+   */
+  private async handleDocumentOp(
+    did: string,
+    operation: string,
+    rkey: string,
+    record: unknown,
+  ): Promise<void> {
+    if (operation === "create") {
+      await this.indexDocumentIfKnown(did, rkey, record);
+      return;
+    }
+    if (operation === "update") {
+      const wrote = await this.indexDocumentIfKnown(did, rkey, record);
+      if (wrote) this.documentsUpdated++;
+      return;
+    }
+    if (operation === "delete") {
+      await this.deleteDocument(did, rkey);
+      return;
+    }
+    // Unknown operation — silently ignore. Jetstream event schema
+    // is stable (create/update/delete), but being defensive here
+    // means future ops don't crash the handler.
+  }
+
+  /**
+   * Delete a document from both Vectorize and D1 on a Jetstream
+   * delete event. Vector delete first, then D1 — orphan vectors
+   * are cheaper to recover from than orphan D1 rows (see the spec
+   * for the ordering rationale).
+   *
+   * Does NOT check the known-publisher filter. A publisher that
+   * was known at some point in the past may have been removed
+   * from the publishers table (e.g., marked bridged) but still
+   * have documents in D1 that we want to respect deletes for.
+   * DELETEs against nothing are cheap no-ops.
+   */
+  private async deleteDocument(did: string, rkey: string): Promise<void> {
+    const uri = `at://${did}/${DOCUMENT_COLLECTION}/${rkey}`;
+
+    // Vector first: if this fails, we get an orphan vector, which
+    // is recoverable by a future diff-against-documents cleanup.
+    try {
+      const [vectorIdHash] = await vectorIds([uri]);
+      await this.env.VECTORS.deleteByIds([vectorIdHash]);
+    } catch (err) {
+      console.warn(`Jetstream: vector delete failed for ${uri}:`, err);
+    }
+
+    // D1 second: batch two statements so recommendations are
+    // cleaned up before the documents row (preventing a window
+    // where a rec row points at a just-deleted doc row).
+    try {
+      await this.env.DB.batch([
+        this.env.DB
+          .prepare(`DELETE FROM recommendations WHERE document_uri = ?`)
+          .bind(uri),
+        this.env.DB
+          .prepare(`DELETE FROM documents WHERE uri = ?`)
+          .bind(uri),
+      ]);
+      this.documentsDeleted++;
+    } catch (err) {
+      console.warn(`Jetstream: D1 delete failed for ${uri}:`, err);
+    }
+  }
+
   private async indexDocumentIfKnown(
     did: string,
     rkey: string,
     record: unknown,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const validated = validateStandardDocument(record);
     if (!validated) {
       console.warn(`Jetstream: invalid document record from ${did}/${rkey}`);
-      return;
+      this.documentsRejected++;
+      return false;
     }
 
     // Only insert documents from known, non-bridged publishers
@@ -182,14 +277,16 @@ export class JetstreamListener extends DurableObject<Env> {
       )
       .bind(did)
       .first();
-    if (!known) return;
+    if (!known) return false;
 
     const uri = `at://${did}/${DOCUMENT_COLLECTION}/${rkey}`;
     try {
       await upsertDocumentStmt(this.env.DB, uri, did, validated).run();
       this.documentsIndexed++;
+      return true;
     } catch {
       // D1 write failed — non-fatal
+      return false;
     }
   }
 }
