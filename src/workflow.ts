@@ -249,11 +249,16 @@ export class SyncPipelineWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       );
 
       // Only log when something interesting happened (non-zero stored,
-      // bridged, or errors). The sync loop can run hundreds of batches and
+      // bridged, skipped, or errors). The sync loop can run hundreds of batches and
       // each log line eats into the 256KB per-invocation log budget.
-      if (result.stored > 0 || result.bridged > 0 || result.errors > 0) {
+      if (
+        result.stored > 0 ||
+        result.bridged > 0 ||
+        result.errors > 0 ||
+        result.skipped > 0
+      ) {
         console.log(
-          `  batch ${scope}-${i}: processed=${result.processed} stored=${result.stored} bridged=${result.bridged} errors=${result.errors}`,
+          `  batch ${scope}-${i}: processed=${result.processed} stored=${result.stored} bridged=${result.bridged} skipped=${result.skipped} errors=${result.errors}`,
         );
       }
 
