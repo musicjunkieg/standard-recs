@@ -112,7 +112,7 @@ The cron trigger is unaffected because it invokes `env.SYNC_PIPELINE.create()` d
 If something breaks post-deploy, the rollback is:
 
 1. `git revert <merge-commit>` and redeploy, OR
-2. `wrangler secret delete ADMIN_TOKEN` — this will cause admin routes to 500, but the secret can be re-put without a redeploy.
+2. `wrangler secret delete ADMIN_TOKEN` — this will fail closed: every `/admin/*` request returns 401 (same mechanism as the missing-secret case described above). The secret can be re-put without a redeploy.
 
 Public routes (enroll, recs, stats, OAuth, users) are never touched by this change and cannot break from an admin-token misconfiguration.
 

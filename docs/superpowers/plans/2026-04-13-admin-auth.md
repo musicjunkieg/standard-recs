@@ -310,7 +310,7 @@
 
 - [ ] **Step 7: Handoff**
 
-  Do NOT merge the PR. Do NOT deploy. Do NOT set the secret yourself. These are all user-gated actions per `CLAUDE.md` and the subagent-driven-development skill. Return control to the controller with a DONE status and the PR URL.
+  Do not merge, deploy, or set the secret yourself — these actions are user-gated per `CLAUDE.md` and the subagent-driven-development skill. Return control to the controller with a DONE status and the PR URL.
 
 ---
 
