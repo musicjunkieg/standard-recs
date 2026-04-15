@@ -1137,7 +1137,7 @@ While working in `src/sync/documents.ts`, you will see that `markBridgedPublishe
   Run: `git status --short`
 
   Expected:
-  ```
+  ```text
    M wrangler.toml
   ?? .claude/
   ?? docs/stitch/
@@ -1155,7 +1155,7 @@ While working in `src/sync/documents.ts`, you will see that `markBridgedPublishe
   Run: `git log --oneline main..HEAD`
 
   Expected (top to bottom, most recent first):
-  ```
+  ```text
   <task-6-sha> feat(jetstream): handle document update/delete + add counters
   <task-5-sha> refactor(jetstream): split rkey/record parsing out of indexDocumentIfKnown
   <task-4-sha> feat(workflow): surface skipped count in batch log line

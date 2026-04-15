@@ -80,7 +80,7 @@ New private method `deleteDocument(did: string, rkey: string)` on the Jetstream 
 2. Compute the vector ID via the existing `vectorIds([uri])` helper from `src/recommend/vector-id.ts`. This is the same mapping the cron path uses, so there's no risk of drift.
 3. Delete the vector first via `env.VECTORS.deleteByIds([vectorId])`. Wrap in try/catch; on failure, log at warn level and continue.
 4. Delete the D1 rows via `db.batch` of two statements, in order:
-   ```
+   ```sql
    DELETE FROM recommendations WHERE document_uri = ?
    DELETE FROM documents WHERE uri = ?
    ```
@@ -221,7 +221,7 @@ UPDATE publishers SET last_synced_rev = ? WHERE did = ?
 
 Extend the batch-log line in `runBatchedDocumentSync` to include the new `skipped` field:
 
-```
+```text
 batch full-0: processed=50 stored=2 bridged=0 skipped=47 errors=1
 ```
 
@@ -256,7 +256,7 @@ Post-deploy, in order:
    npx wrangler tail
    ```
    On the second post-deploy cron (first cron after `last_synced_rev` is populated), batch log lines should show `skipped > 0`. A typical healthy log line:
-   ```
+   ```text
    batch full-0: processed=50 stored=0 bridged=0 skipped=48 errors=0
    ```
 
