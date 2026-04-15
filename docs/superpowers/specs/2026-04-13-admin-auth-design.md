@@ -90,9 +90,11 @@ Remove the inline `const token = …; if (!token || token !== c.env.VOYAGE_API_K
 Before merging and deploying, the operator must set the secret:
 
 ```bash
-openssl rand -hex 32 | tee admin-token.txt        # save a copy somewhere safe
-wrangler secret put ADMIN_TOKEN                   # paste the value when prompted
+# Generate the token and pipe it directly into wrangler — no plaintext copy on disk.
+openssl rand -hex 32 | wrangler secret put ADMIN_TOKEN
 ```
+
+If you also need the value locally for ad-hoc smoke tests, store it in a secret manager (macOS Keychain via `security add-generic-password`, 1Password CLI, `pass`, etc.) rather than writing it to a file in the repo or home directory. Do **not** `tee` the output into `admin-token.txt` or any other plaintext file — that leaves the secret on disk for backup scanners, accidental commits, and shell-history greps to find.
 
 If the secret is missing at runtime, `bearerAuth({ token: undefined })` does **not** throw during construction — the guard inside `bearerAuth` is `if (!("token" in options || "verifyToken" in options))`, and since `{ token: undefined }` has the key present, construction succeeds. At request time, `typeof options.token === "string"` is false and `Array.isArray(undefined)` is false, so `equal` stays `false` and every request is rejected with `401 Unauthorized`. The middleware still fails closed — admin routes are unreachable — but the observable signal is a 401, not a 500. Public routes remain unaffected. When testing pre-deploy, a 401 on `/admin/sync` is ambiguous: it could mean "secret is set and the token I sent is wrong" or "secret is unset entirely." The operator verification steps below must therefore always assert both the missing-header and correct-token cases.
 
