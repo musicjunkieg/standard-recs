@@ -9,7 +9,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { bearerAuth } from "hono/bearer-auth";
 import type { Env } from "../env.js";
-import { type Variant, variantFromHost } from "../variants.js";
+import { type Variant, VARIANTS, variantFromHost } from "../variants.js";
 import { createOAuthClient, buildClientMetadata } from "../oauth/client.js";
 import { AtpAgent } from "@atproto/api";
 
@@ -34,7 +34,10 @@ api.use("*", cors());
 // hostnames. Unknown hosts fall back to "standard" inside
 // variantFromHost so dev mode (localhost:8787) still works.
 api.use("*", async (c, next) => {
-  const variant = variantFromHost(c.req.header("host"));
+  const override = c.req.query("_variant") as Variant["key"] | undefined;
+  const variant = override && VARIANTS[override]
+    ? VARIANTS[override]
+    : variantFromHost(c.req.header("host"));
   c.set("variant", variant);
   await next();
 });
