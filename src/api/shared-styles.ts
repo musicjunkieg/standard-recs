@@ -74,7 +74,8 @@ export function designTokens(variant: Variant): string {
       --border-style: ${mood.borderStyle};
       --grain-opacity: ${mood.grainOpacity};
       --card-offset: ${mood.cardOffset};
-      --hero-align: ${mood.heroAlign};
+      --hero-items-align: ${mood.heroItemsAlign};
+      --hero-text-align: ${mood.heroTextAlign};
       --title-shift: ${mood.titleShift};
       --tagline-shift: ${mood.taglineShift};
       --tagline-strike: ${mood.taglineStrike};
@@ -150,7 +151,8 @@ type Mood = {
   borderStyle: string;
   grainOpacity: string;
   cardOffset: string;
-  heroAlign: string;
+  heroItemsAlign: string;
+  heroTextAlign: string;
   titleShift: string;
   taglineShift: string;
   taglineStrike: string;
@@ -170,7 +172,8 @@ function moodDials(key: Variant["key"]): Mood {
         borderStyle: "solid",
         grainOpacity: "0.06",
         cardOffset: "0px",
-        heroAlign: "center",
+        heroItemsAlign: "center",
+        heroTextAlign: "center",
         titleShift: "0px",
         taglineShift: "0px",
         taglineStrike: "none",
@@ -187,7 +190,8 @@ function moodDials(key: Variant["key"]): Mood {
         borderStyle: "solid",
         grainOpacity: "0.09",
         cardOffset: "0px",
-        heroAlign: "left",
+        heroItemsAlign: "flex-start",
+        heroTextAlign: "left",
         titleShift: "-8px",
         taglineShift: "12px",
         taglineStrike: "none",
@@ -204,7 +208,8 @@ function moodDials(key: Variant["key"]): Mood {
         borderStyle: "dashed",
         grainOpacity: "0.14",
         cardOffset: "5px",
-        heroAlign: "center",
+        heroItemsAlign: "center",
+        heroTextAlign: "center",
         titleShift: "0px",
         taglineShift: "0px",
         taglineStrike: "line-through",
@@ -311,8 +316,8 @@ export function baseLayout(): string {
     .masthead {
       display: flex;
       flex-direction: column;
-      align-items: var(--hero-align);
-      text-align: var(--hero-align);
+      align-items: var(--hero-items-align);
+      text-align: var(--hero-text-align);
       gap: 1.25rem;
       margin-bottom: 3.5rem;
       opacity: 0;

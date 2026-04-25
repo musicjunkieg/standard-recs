@@ -35,7 +35,7 @@ ${baseLayout()}
     .lookup-body {
       display: flex;
       flex-direction: column;
-      align-items: var(--hero-align);
+      align-items: var(--hero-items-align);
       padding: 1.5rem 0 3rem;
       max-width: 38rem;
       width: 100%;
