@@ -173,7 +173,10 @@ ${footerMarkup(variant)}
       hideSuggestions();
       input.value = '@' + actor.handle;
       spinner.classList.add('active');
-      window.location.href = '/recs/by-handle/' + encodeURIComponent(actor.handle);
+      var target = '/recs/by-handle/' + encodeURIComponent(actor.handle);
+      var v = new URLSearchParams(location.search).get('_variant');
+      if (v) target += '?_variant=' + encodeURIComponent(v);
+      window.location.href = target;
     }
   </script>
 
