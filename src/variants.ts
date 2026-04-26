@@ -111,7 +111,8 @@ export const HOSTNAME_TO_VARIANT: Record<string, Variant["key"]> = {
  */
 export function variantFromHost(host: string | undefined): Variant {
   if (host) {
-    const key = HOSTNAME_TO_VARIANT[host];
+    const bare = host.replace(/:\d+$/, "");
+    const key = HOSTNAME_TO_VARIANT[bare];
     if (key) return VARIANTS[key];
   }
   return VARIANTS.standard;
