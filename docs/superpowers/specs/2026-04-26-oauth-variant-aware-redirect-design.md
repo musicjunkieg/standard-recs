@@ -24,7 +24,7 @@ Out of scope:
 - Persisting variant preference per user across sessions (e.g., a cookie or DB field). The variant is determined per request by Host header, and that's the existing pattern. We just need to honor the originating host through one OAuth roundtrip.
 - Cross-variant navigation UI (e.g., "switch to substandard" link). Users navigate by typing the hostname.
 - Changing the canonical client_id / client metadata location. The OAuth client is one OAuth client from PDS's perspective; we just want it to have multiple valid redirect URIs.
-- Changing how `WORKER_URL` is used elsewhere (the `/api` info endpoint, the `JETSTREAM_LISTENER` DO setup, etc.). `WORKER_URL` remains the canonical app URL; only the OAuth `redirect_uris` get expanded.
+- Changing how `WORKER_URL` is used. Today it is referenced only in `src/oauth/client.ts` (passed to `buildClientMetadata` for `client_id`, `client_uri`, and `jwks_uri`); it stays pinned to the canonical app URL. Only the OAuth `redirect_uris` array gets expanded.
 
 ## Approach
 
