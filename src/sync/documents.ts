@@ -414,6 +414,20 @@ export type StandardDocument = {
 };
 
 /**
+ * Coerce a possibly-non-string value to `string | null`. The
+ * StandardDocument type advertises optional string fields, but
+ * validateStandardDocument only enforces site/title/publishedAt —
+ * everything else is whatever the publisher chose to write. Some
+ * publishers post objects/arrays for `path` or `description`, which
+ * D1's `.bind()` rejects as `D1_TYPE_ERROR: Type 'object' not
+ * supported`. Use this on every untrusted optional string field
+ * before binding to dodge that whole class of failure.
+ */
+function strOrNull(v: unknown): string | null {
+  return typeof v === "string" ? v : null;
+}
+
+/**
  * Upsert a single Standard.site document into D1.
  * Used by both the cron pipeline and the Jetstream listener.
  */
@@ -423,8 +437,11 @@ export function upsertDocumentStmt(
   did: string,
   doc: StandardDocument,
 ): D1PreparedStatement {
+  const path = strOrNull(doc.path);
+  const description = strOrNull(doc.description);
+  const textContentRaw = strOrNull(doc.textContent);
   const textContent =
-    doc.textContent?.trim() || doc.description?.trim() || doc.title || null;
+    textContentRaw?.trim() || description?.trim() || doc.title || null;
   return db
     .prepare(
       `INSERT OR REPLACE INTO documents
@@ -436,8 +453,8 @@ export function upsertDocumentStmt(
       did,
       doc.site ?? null,
       doc.title,
-      doc.path ?? null,
-      doc.description ?? null,
+      path,
+      description,
       textContent,
       doc.tags ? JSON.stringify(doc.tags) : null,
       doc.publishedAt ?? null,
