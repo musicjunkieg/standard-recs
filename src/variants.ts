@@ -14,6 +14,7 @@
 export type RankingStrategy =
   | { kind: "topN" }
   | { kind: "mmr" }
+  | { kind: "antiMmr" }
   | { kind: "placeholder" };
 
 // MMR's lambda and candidate pool size are intentionally NOT on the
@@ -91,7 +92,7 @@ export const VARIANTS: Record<Variant["key"], Variant> = {
       recsHeading: (handle) => `Anti-recs for @${handle}`,
       footer: "An experiment by standard-recs",
     },
-    ranking: { kind: "placeholder" },
+    ranking: { kind: "antiMmr" },
   },
 };
 

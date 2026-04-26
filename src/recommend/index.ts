@@ -20,14 +20,16 @@ type Recommendation = {
   did: string;
   document_uri: string;
   score: number;
-  variant: "standard" | "nonstandard";
+  variant: "standard" | "nonstandard" | "substandard";
   /**
    * Zero-indexed position within this variant's list, preserving the
    * algorithm's original pick order. For standard this is just top-N by
    * raw cosine. For nonstandard this is the MMR greedy pick order:
    * rank 0 = first pick (no diversity penalty), rank k = pick after
-   * penalizing for similarity to picks 0..k-1. Sorting by score DESC
-   * would scramble the nonstandard order into a different ranking.
+   * penalizing for similarity to picks 0..k-1. For substandard this
+   * is also MMR pick order, but over a separate candidate pool from
+   * a Vectorize query against the negated taste vector. Sorting by
+   * score DESC would scramble the MMR order into a different ranking.
    */
   rank: number;
 };
@@ -197,6 +199,13 @@ export async function generateUserRecommendations(
   // above doesn't need this because Cloudflare handles the scaling
   // internally for cosine similarity ordering.)
   const tasteVectorNormalized = normalizeL2(tasteVector);
+  // Negated taste for substandard: pull docs at the opposite end of
+  // embedding space. antiTaste is for the Vectorize query (Vectorize
+  // handles its own scaling for cosine ordering); antiTasteNormalized
+  // is for pickMMR's relevance term, which needs the input on the
+  // same [-1, 1] cosine scale as the diversity term.
+  const antiTaste = tasteVector.map((x) => -x);
+  const antiTasteNormalized = normalizeL2(antiTaste);
   const nonstandardMatches = pickMMR(
     validMatches.slice(topN),
     standardMatches,
@@ -216,7 +225,79 @@ export async function generateUserRecommendations(
     rank: i,
   }));
 
-  const recs: Recommendation[] = [...standardRecs, ...nonstandardRecs];
+  // 5d. Substandard recs: anti-taste cosine + MMR diversity, disjoint
+  // from standard/nonstandard via URI filter against validMatches.
+  //
+  // Issue a SEPARATE Vectorize query against the negated taste vector
+  // to pull the top-50 docs most opposed to the user's taste. This is
+  // not "absence of taste" — it's content actively in the opposite
+  // direction, the strongest "you'll hate this" signal. Wrapped in
+  // try/catch so a Vectorize hiccup on this query doesn't take down
+  // the standard+nonstandard recs that are already constructed above.
+  //
+  // The disjointness filter (URI Set built from validMatches) honors
+  // the recommendations table's (did, document_uri) PK constraint
+  // without a schema change. Anti-cosine + cosine pull from opposite
+  // ends of embedding space, so collisions are probabilistically
+  // rare, but the filter makes them impossible.
+  //
+  // Empty seed for the MMR call — substandard's pool is structurally
+  // separate from standard/nonstandard, so seeding with their picks
+  // would force diversity against vectors at the opposite end of
+  // space, which would *reward* the most-anti picks (the diversity
+  // term `dot(cVec, p.values!)` would be most negative for the most
+  // anti-aligned items, and MMR subtracts that term). Empty seed
+  // lets internal MMR diversity do clean work within the anti-pool.
+  //
+  // Same MMR_LAMBDA as nonstandard. See the spec's "Why negated
+  // taste" and "Why MMR" sections for the full rationale.
+  let antiMatches: VectorizeMatches;
+  try {
+    antiMatches = await vectors.query(antiTaste, {
+      topK: CANDIDATE_POOL,
+      namespace: "documents",
+      returnValues: true,
+      returnMetadata: "all",
+    });
+  } catch (err) {
+    console.warn(
+      `generateUserRecommendations: substandard query failed for ${did}:`,
+      err,
+    );
+    antiMatches = { matches: [], count: 0 };
+  }
+
+  const standardNonstandardUris = new Set(
+    validMatches.map((m) => (m.metadata as { uri: string }).uri),
+  );
+  const validAntiMatches = antiMatches.matches.filter((match) => {
+    const uri = (match.metadata as { uri?: string } | null)?.uri;
+    return !!uri && !standardNonstandardUris.has(uri);
+  });
+
+  const substandardMatches = pickMMR(
+    validAntiMatches,
+    [],
+    antiTasteNormalized,
+    topN,
+    lambda,
+  );
+
+  const substandardRecs: Recommendation[] = substandardMatches.map(
+    (match, i) => ({
+      did,
+      document_uri: (match.metadata as { uri: string }).uri,
+      score: match.score,
+      variant: "substandard" as const,
+      rank: i,
+    }),
+  );
+
+  const recs: Recommendation[] = [
+    ...standardRecs,
+    ...nonstandardRecs,
+    ...substandardRecs,
+  ];
 
   if (recs.length > 0 && !dryRun) {
     // Clear all existing variants for this user, then insert the new ones.
@@ -236,12 +317,18 @@ export async function generateUserRecommendations(
   }
 
   console.log(
-    `  ${did}: ${standardRecs.length} standard + ${nonstandardRecs.length} nonstandard recommendations generated`,
+    `  ${did}: ${standardRecs.length} standard + ${nonstandardRecs.length} nonstandard + ${substandardRecs.length} substandard recommendations generated`,
   );
   if (nonstandardRecs.length < topN) {
     console.warn(
       `  ${did}: nonstandard recs short (${nonstandardRecs.length}/${topN}) — ` +
       `validMatches=${validMatches.length}, CANDIDATE_POOL=${CANDIDATE_POOL}`,
+    );
+  }
+  if (substandardRecs.length < topN) {
+    console.warn(
+      `  ${did}: substandard recs short (${substandardRecs.length}/${topN}) — ` +
+      `validAntiMatches=${validAntiMatches.length}, CANDIDATE_POOL=${CANDIDATE_POOL}`,
     );
   }
   return recs;
