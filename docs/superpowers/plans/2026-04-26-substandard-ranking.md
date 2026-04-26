@@ -84,7 +84,7 @@
 
 - [ ] **Step 5: Sanity sweep**
 
-  Run: `grep -n "antiMmr\|placeholder" src/`
+  Run: `grep -rn "antiMmr\|placeholder" src/`
 
   Expected: TWO occurrences of `antiMmr` (the union arm and the substandard.ranking value), and ONE occurrence of `placeholder` (the union arm — no longer used by any variant entry, but kept available).
 
