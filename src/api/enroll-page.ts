@@ -12,6 +12,7 @@ import {
   esc,
   fontsHead,
   footerMarkup,
+  keepVariantScript,
   mastheadMarkup,
   themeBootScript,
   themeToggleScript,
@@ -190,6 +191,7 @@ ${footerMarkup(variant)}
   </script>
 
 ${themeToggleScript()}
+${keepVariantScript()}
 </body>
 </html>`;
 }

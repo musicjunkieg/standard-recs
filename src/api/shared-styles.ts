@@ -710,6 +710,38 @@ export function themeToggleScript(): string {
   </script>`;
 }
 
+/**
+ * Rewrites internal anchor `href`s to carry the current `_variant`
+ * query param if one is present. Pure dev convenience: in production
+ * the param is absent so this is a no-op. Without it, the variant
+ * override is lost as soon as you click any internal link.
+ *
+ * Targets every same-origin anchor automatically — no markup changes
+ * required at the call site.
+ */
+export function keepVariantScript(): string {
+  return `  <script>
+    (function(){
+      var params = new URLSearchParams(location.search);
+      var v = params.get('_variant');
+      if (!v) return;
+      var anchors = document.querySelectorAll('a[href]');
+      anchors.forEach(function(a) {
+        var href = a.getAttribute('href');
+        if (!href) return;
+        // Skip external links, anchors, mailto:, tel:, etc.
+        if (/^[a-z]+:|^\\/\\//i.test(href) || href.charAt(0) === '#') return;
+        var url = new URL(href, location.href);
+        if (url.origin !== location.origin) return;
+        if (!url.searchParams.has('_variant')) {
+          url.searchParams.set('_variant', v);
+        }
+        a.setAttribute('href', url.pathname + url.search + url.hash);
+      });
+    })();
+  </script>`;
+}
+
 export function esc(s: string): string {
   return s
     .replace(/&/g, "&amp;")

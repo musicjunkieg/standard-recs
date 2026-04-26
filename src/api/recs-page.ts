@@ -15,6 +15,7 @@ import {
   esc,
   fontsHead,
   footerMarkup,
+  keepVariantScript,
   mastheadMarkup,
   themeBootScript,
   themeToggleScript,
@@ -234,6 +235,7 @@ ${atmosphereMarkup()}
 ${footerMarkup(data.variant)}
 
 ${themeToggleScript()}
+${keepVariantScript()}
 </body>
 </html>`;
 
