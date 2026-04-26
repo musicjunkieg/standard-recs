@@ -58,6 +58,7 @@ ${mastheadMarkup(variant, {
           <input
             type="text"
             id="handle-input"
+            aria-label="Bluesky handle"
             placeholder="${esc(variant.copy.placeholder)}"
             autocomplete="off"
             spellcheck="false"
