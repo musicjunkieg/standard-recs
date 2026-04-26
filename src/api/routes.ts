@@ -248,12 +248,6 @@ api.get("/stats", async (c) => {
   });
 });
 
-// List enrolled users
-api.get("/users", async (c) => {
-  const users = await listUsers(c.env.DB);
-  return c.json({ users });
-});
-
 // Admin routes require a valid bearer token. The token is a per-
 // deployment secret (wrangler secret put ADMIN_TOKEN). We construct
 // bearerAuth per request because the middleware takes `token` at
@@ -266,6 +260,14 @@ api.use("/admin/*", async (c, next) => {
 });
 
 // ─── Admin ───
+
+// List enrolled users — was previously at /users (unauthenticated)
+// which leaked the full DID list. Same handler, gated by the
+// /admin/* bearer middleware above.
+api.get("/admin/users", async (c) => {
+  const users = await listUsers(c.env.DB);
+  return c.json({ users });
+});
 
 // Trigger full sync pipeline
 api.post("/admin/sync", async (c) => {
