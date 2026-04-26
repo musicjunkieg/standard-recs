@@ -15,7 +15,18 @@ function buildClientMetadata(workerUrl: string) {
     client_id: `${base}/oauth/client-metadata.json`,
     client_name: "standard-recs",
     client_uri: base,
-    redirect_uris: [`${base}/oauth/callback`] as [string, ...string[]],
+    // Register all three variant hostnames as valid redirect URIs.
+    // PDS will only honor a redirect_uri that exactly matches one of
+    // these. The /enroll handler picks the right one per request based
+    // on the Host header so the user lands back on the variant they
+    // enrolled from. client_id and jwks_uri stay on the canonical
+    // worker URL so PDS treats this as one OAuth client across all
+    // three variant hostnames.
+    redirect_uris: [
+      "https://standardrecs.site/oauth/callback",
+      "https://nonstandardrecs.site/oauth/callback",
+      "https://substandardrecs.site/oauth/callback",
+    ] as [string, ...string[]],
     scope: "atproto rpc:app.bsky.feed.getActorLikes?aud=* transition:generic",
     grant_types: [
       "authorization_code",

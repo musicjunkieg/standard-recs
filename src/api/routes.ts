@@ -68,6 +68,14 @@ api.get("/enroll", async (c) => {
     return c.redirect("/?error=resolve_failed");
   }
 
+  // Use the originating host's callback URL so PDS sends the user
+  // back to the variant they enrolled from. variantFromHost (run by
+  // the global middleware above) handles port stripping and
+  // unknown-host fallback (always returning the standard variant),
+  // so this works in dev and prod.
+  const variant = c.get("variant");
+  const redirectUri = `https://${variant.hostname}/oauth/callback` as `https://${string}`;
+
   try {
     const client = await createOAuthClient(c.env);
 
@@ -76,6 +84,7 @@ api.get("/enroll", async (c) => {
     try {
       url = await client.authorize(handle, {
         scope: "atproto rpc:app.bsky.feed.getActorLikes?aud=*",
+        redirect_uri: redirectUri,
       });
     } catch (scopeErr) {
       const isScopeRejection =
@@ -86,6 +95,7 @@ api.get("/enroll", async (c) => {
       console.warn("Granular scope rejected, falling back to transition:generic");
       url = await client.authorize(handle, {
         scope: "atproto transition:generic",
+        redirect_uri: redirectUri,
       });
     }
 
