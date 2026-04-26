@@ -97,13 +97,17 @@ export const VARIANTS: Record<Variant["key"], Variant> = {
 
 ### Changed: `src/recommend/index.ts`
 
-`generateUserRecommendations` gains a substandard step after the existing nonstandard step. No changes to function signature; the returned `recs` array now includes substandard rows alongside standard and nonstandard.
+Two changes in this file:
+
+1. **Widen the `Recommendation` type's `variant` union.** Currently `"standard" | "nonstandard"` (line 23). Must become `"standard" | "nonstandard" | "substandard"`. Without this widening, `variant: "substandard" as const` in the new mapping step is a TypeScript error.
+
+2. **`generateUserRecommendations` gains a substandard step** after the existing nonstandard step. No changes to function signature; the returned `recs` array now includes substandard rows alongside standard and nonstandard.
 
 No changes to `src/recommend/mmr.ts` (the existing `pickMMR` is reused as-is). No changes to `src/recommend/embed.ts` or anywhere else.
 
 ## Control flow inside `generateUserRecommendations`
 
-After the existing nonstandard MMR pass (around line 217):
+After the existing nonstandard MMR pass — specifically, after `nonstandardRecs` is fully assembled (around line 217) but BEFORE the `const recs = [...standardRecs, ...nonstandardRecs]` concatenation (around line 219). The new substandard block slots between those two points; the concatenation line is then updated to include `...substandardRecs`.
 
 1. **Construct anti-taste vector.**
    ```ts
