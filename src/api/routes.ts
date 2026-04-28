@@ -68,23 +68,22 @@ api.get("/enroll", async (c) => {
     return c.redirect("/?error=resolve_failed");
   }
 
-  // Use the originating host's callback URL so PDS sends the user
-  // back to the variant they enrolled from. variantFromHost (run by
-  // the global middleware above) handles port stripping and
-  // unknown-host fallback (always returning the standard variant),
-  // so this works in dev and prod.
+  // Pass the originating host to the OAuth client factory so the
+  // runtime client metadata's redirect_uris is single-element and
+  // matches what we want PDS to record. See oauth/client.ts for the
+  // full rationale (the AT Proto OAuth library hardcodes
+  // redirect_uris[0] at token-exchange time, so the runtime metadata
+  // must list exactly the one URL we want used per request).
   const variant = c.get("variant");
-  const redirectUri = `https://${variant.hostname}/oauth/callback` as `https://${string}`;
 
   try {
-    const client = await createOAuthClient(c.env);
+    const client = await createOAuthClient(c.env, variant.hostname);
 
     // Try granular scope first; fall back to transition:generic only on scope rejection
     let url: URL;
     try {
       url = await client.authorize(handle, {
         scope: "atproto rpc:app.bsky.feed.getActorLikes?aud=*",
-        redirect_uri: redirectUri,
       });
     } catch (scopeErr) {
       const isScopeRejection =
@@ -95,7 +94,6 @@ api.get("/enroll", async (c) => {
       console.warn("Granular scope rejected, falling back to transition:generic");
       url = await client.authorize(handle, {
         scope: "atproto transition:generic",
-        redirect_uri: redirectUri,
       });
     }
 
@@ -567,7 +565,12 @@ api.get("/oauth/jwks.json", async (c) => {
 // OAuth callback — exchanges code for tokens, creates user, triggers sync
 api.get("/oauth/callback", async (c) => {
   try {
-    const client = await createOAuthClient(c.env);
+    // Pass the host that received this callback to the OAuth client
+    // factory so the runtime client's redirect_uris[0] matches what
+    // PDS recorded at authorize time. See oauth/client.ts for the
+    // full rationale.
+    const variant = c.get("variant");
+    const client = await createOAuthClient(c.env, variant.hostname);
     const params = new URL(c.req.url).searchParams;
     const { session } = await client.callback(params);
     const did = session.did;

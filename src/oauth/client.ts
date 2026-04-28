@@ -9,24 +9,56 @@ import { JoseKey } from "@atproto/jwk-jose";
 import type { Env } from "../env.js";
 import { createStateStore, createSessionStore } from "./stores.js";
 
-function buildClientMetadata(workerUrl: string) {
+const ALL_REDIRECT_URIS = [
+  "https://standardrecs.site/oauth/callback",
+  "https://nonstandardrecs.site/oauth/callback",
+  "https://substandardrecs.site/oauth/callback",
+] as const;
+
+/**
+ * Build the OAuth client metadata document.
+ *
+ * The PUBLISHED form (served at `/oauth/client-metadata.json`) lists all
+ * three variant callback URLs. PDS fetches that document and validates
+ * incoming `redirect_uri` values against it, so any of the three variants
+ * is a valid landing target.
+ *
+ * The RUNTIME form (used to construct the in-memory `WorkersOAuthClient`
+ * for a specific request) lists ONLY the current variant's callback URL.
+ * The reason is non-obvious: the underlying AT Proto OAuth library
+ * hardcodes `redirect_uri: this.clientMetadata.redirect_uris[0]` in its
+ * token-exchange request (see `oauth-server-agent.js:99` in the installed
+ * library). It does NOT persist the per-authorize redirect_uri in state.
+ * If we configured the runtime client with all three URIs, the library
+ * would always send `redirect_uris[0]` (standardrecs.site) at token
+ * exchange — which would mismatch the variant-specific URL recorded by
+ * PDS at authorize time, and PDS would reject with `invalid_grant:
+ * redirect_uri mismatch`.
+ *
+ * Workaround: per-request, build a runtime client whose `redirect_uris`
+ * contains ONLY the current variant's URL. Then `redirect_uris[0]` at
+ * authorize and at token exchange both resolve to the same value,
+ * matching what PDS recorded. This is invisible to PDS — it only ever
+ * sees the published metadata file (all three URLs) when validating.
+ *
+ * @param workerUrl - canonical app URL, used for client_id / jwks_uri
+ * @param options.variantHostname - if provided, the runtime form returns
+ *   only this variant's callback URL. If omitted, returns all three (for
+ *   the `/oauth/client-metadata.json` route).
+ */
+function buildClientMetadata(
+  workerUrl: string,
+  options?: { variantHostname?: string },
+) {
   const base = workerUrl.replace(/\/$/, "");
+  const redirectUris: [string, ...string[]] = options?.variantHostname
+    ? [`https://${options.variantHostname}/oauth/callback`]
+    : [...ALL_REDIRECT_URIS];
   return {
     client_id: `${base}/oauth/client-metadata.json`,
     client_name: "standard-recs",
     client_uri: base,
-    // Register all three variant hostnames as valid redirect URIs.
-    // PDS will only honor a redirect_uri that exactly matches one of
-    // these. The /enroll handler picks the right one per request based
-    // on the Host header so the user lands back on the variant they
-    // enrolled from. client_id and jwks_uri stay on the canonical
-    // worker URL so PDS treats this as one OAuth client across all
-    // three variant hostnames.
-    redirect_uris: [
-      "https://standardrecs.site/oauth/callback",
-      "https://nonstandardrecs.site/oauth/callback",
-      "https://substandardrecs.site/oauth/callback",
-    ] as [string, ...string[]],
+    redirect_uris: redirectUris,
     scope: "atproto rpc:app.bsky.feed.getActorLikes?aud=* transition:generic",
     grant_types: [
       "authorization_code",
@@ -45,7 +77,10 @@ function buildClientMetadata(workerUrl: string) {
 
 export { buildClientMetadata };
 
-export async function createOAuthClient(env: Env): Promise<WorkersOAuthClient> {
+export async function createOAuthClient(
+  env: Env,
+  variantHostname?: string,
+): Promise<WorkersOAuthClient> {
   if (!env.WORKER_URL) {
     throw new Error("WORKER_URL config var is required for OAuth client metadata");
   }
@@ -53,7 +88,7 @@ export async function createOAuthClient(env: Env): Promise<WorkersOAuthClient> {
   const key = await JoseKey.fromImportable(env.OAUTH_PRIVATE_KEY, "key-1");
 
   return new WorkersOAuthClient({
-    clientMetadata: buildClientMetadata(env.WORKER_URL),
+    clientMetadata: buildClientMetadata(env.WORKER_URL, { variantHostname }),
     keyset: [key],
     stateStore: createStateStore(env.DB),
     sessionStore: createSessionStore(env.DB),
